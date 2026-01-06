@@ -4,8 +4,8 @@ Handles all interactions with ICICI Direct Breeze SDK
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Any
+from datetime import datetime
+from typing import Dict, List, Any
 import pandas as pd
 from breeze_connect import BreezeConnect
 import pytz
@@ -30,15 +30,7 @@ class BreezeClientWrapper:
         self.ist = pytz.timezone('Asia/Kolkata')
         
     def connect(self, session_token: str) -> Dict[str, Any]:
-        """
-        Connect to Breeze API with session token
-        
-        Args:
-            session_token: Session token from ICICI Direct login
-            
-        Returns:
-            Connection status dictionary
-        """
+        """Connect to Breeze API with session token"""
         try:
             self.breeze = BreezeConnect(api_key=self.api_key)
             self.breeze.generate_session(
@@ -86,25 +78,11 @@ class BreezeClientWrapper:
         strike_price: str = "",
         option_type: str = ""
     ) -> Dict[str, Any]:
-        """
-        Get option chain data
-        
-        Args:
-            stock_code: Stock/Index code (NIFTY, BANKNIFTY, SENSEX)
-            exchange: Exchange (NFO, BFO)
-            expiry_date: Expiry date in YYYY-MM-DD format
-            product_type: Product type (options)
-            strike_price: Specific strike price (optional)
-            option_type: CE or PE (optional)
-            
-        Returns:
-            Option chain data
-        """
+        """Get option chain data"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
         try:
-            # Format expiry date
             expiry_dt = datetime.strptime(expiry_date, "%Y-%m-%d")
             formatted_expiry = expiry_dt.strftime("%d-%b-%Y")
             
@@ -131,20 +109,7 @@ class BreezeClientWrapper:
         option_type: str,
         product_type: str = "options"
     ) -> Dict[str, Any]:
-        """
-        Get real-time quotes for specific option
-        
-        Args:
-            stock_code: Stock/Index code
-            exchange: Exchange code
-            expiry_date: Expiry date
-            strike_price: Strike price
-            option_type: CE or PE
-            product_type: Product type
-            
-        Returns:
-            Quote data
-        """
+        """Get real-time quotes for specific option"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -157,7 +122,7 @@ class BreezeClientWrapper:
                 exchange_code=exchange,
                 expiry_date=formatted_expiry,
                 product_type=product_type,
-                right=option_type,
+                right=option_type.lower() if option_type.upper() == "CE" else "put",
                 strike_price=str(strike_price)
             )
             
@@ -183,28 +148,7 @@ class BreezeClientWrapper:
         validity_date: str = "",
         disclosed_quantity: int = 0
     ) -> Dict[str, Any]:
-        """
-        Place an order
-        
-        Args:
-            stock_code: Stock/Index code
-            exchange: Exchange code
-            expiry_date: Expiry date
-            strike_price: Strike price
-            option_type: CE or PE
-            action: buy or sell
-            quantity: Number of lots
-            order_type: market or limit
-            price: Limit price (for limit orders)
-            product_type: options
-            stoploss: Stop loss price
-            validity: day, ioc, vtc
-            validity_date: Date for VTC orders
-            disclosed_quantity: Disclosed quantity
-            
-        Returns:
-            Order response
-        """
+        """Place an order"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -212,11 +156,14 @@ class BreezeClientWrapper:
             expiry_dt = datetime.strptime(expiry_date, "%Y-%m-%d")
             formatted_expiry = expiry_dt.strftime("%d-%b-%Y")
             
+            # Convert option type
+            right = "call" if option_type.upper() == "CE" else "put"
+            
             order_response = self.breeze.place_order(
                 stock_code=stock_code,
                 exchange_code=exchange,
                 product="options",
-                action=action,
+                action=action.lower(),
                 order_type=order_type.lower(),
                 stoploss=str(stoploss) if stoploss > 0 else "",
                 quantity=str(quantity),
@@ -225,7 +172,7 @@ class BreezeClientWrapper:
                 validity_date=validity_date,
                 disclosed_quantity=str(disclosed_quantity) if disclosed_quantity > 0 else "",
                 expiry_date=formatted_expiry,
-                right=option_type,
+                right=right,
                 strike_price=str(strike_price)
             )
             
@@ -245,27 +192,13 @@ class BreezeClientWrapper:
         order_type: str = "market",
         price: float = 0
     ) -> Dict[str, Any]:
-        """
-        Sell Call Option (Short Call)
-        
-        Args:
-            stock_code: Index code
-            exchange: Exchange
-            expiry_date: Expiry date
-            strike_price: Strike price
-            quantity: Quantity
-            order_type: market or limit
-            price: Limit price
-            
-        Returns:
-            Order response
-        """
+        """Sell Call Option (Short Call)"""
         return self.place_order(
             stock_code=stock_code,
             exchange=exchange,
             expiry_date=expiry_date,
             strike_price=strike_price,
-            option_type="call",
+            option_type="CE",
             action="sell",
             quantity=quantity,
             order_type=order_type,
@@ -282,27 +215,13 @@ class BreezeClientWrapper:
         order_type: str = "market",
         price: float = 0
     ) -> Dict[str, Any]:
-        """
-        Sell Put Option (Short Put)
-        
-        Args:
-            stock_code: Index code
-            exchange: Exchange
-            expiry_date: Expiry date
-            strike_price: Strike price
-            quantity: Quantity
-            order_type: market or limit
-            price: Limit price
-            
-        Returns:
-            Order response
-        """
+        """Sell Put Option (Short Put)"""
         return self.place_order(
             stock_code=stock_code,
             exchange=exchange,
             expiry_date=expiry_date,
             strike_price=strike_price,
-            option_type="put",
+            option_type="PE",
             action="sell",
             quantity=quantity,
             order_type=order_type,
@@ -321,24 +240,7 @@ class BreezeClientWrapper:
         order_type: str = "market",
         price: float = 0
     ) -> Dict[str, Any]:
-        """
-        Square off an existing position
-        
-        Args:
-            stock_code: Index code
-            exchange: Exchange
-            expiry_date: Expiry date
-            strike_price: Strike price
-            option_type: CE or PE
-            quantity: Quantity to square off
-            current_position: Current position (long/short)
-            order_type: market or limit
-            price: Limit price
-            
-        Returns:
-            Order response
-        """
-        # Determine action based on current position
+        """Square off an existing position"""
         action = "sell" if current_position.lower() == "long" else "buy"
         
         return self.place_order(
@@ -346,7 +248,7 @@ class BreezeClientWrapper:
             exchange=exchange,
             expiry_date=expiry_date,
             strike_price=strike_price,
-            option_type="call" if option_type == "CE" else "put",
+            option_type=option_type,
             action=action,
             quantity=quantity,
             order_type=order_type,
@@ -354,12 +256,7 @@ class BreezeClientWrapper:
         )
     
     def get_portfolio_positions(self) -> Dict[str, Any]:
-        """
-        Get current portfolio positions
-        
-        Returns:
-            Positions data
-        """
+        """Get current portfolio positions"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -370,46 +267,13 @@ class BreezeClientWrapper:
             logger.error(f"Failed to get positions: {str(e)}")
             return {"success": False, "message": str(e)}
     
-    def get_portfolio_holdings(self) -> Dict[str, Any]:
-        """
-        Get portfolio holdings
-        
-        Returns:
-            Holdings data
-        """
-        if not self.is_connected:
-            return {"success": False, "message": "Not connected"}
-        
-        try:
-            holdings = self.breeze.get_portfolio_holdings(
-                exchange_code="NFO",
-                from_date="",
-                to_date="",
-                stock_code="",
-                portfolio_type=""
-            )
-            return {"success": True, "data": holdings}
-        except Exception as e:
-            logger.error(f"Failed to get holdings: {str(e)}")
-            return {"success": False, "message": str(e)}
-    
     def get_order_list(
         self,
         exchange: str = "",
         from_date: str = "",
         to_date: str = ""
     ) -> Dict[str, Any]:
-        """
-        Get list of orders
-        
-        Args:
-            exchange: Exchange code
-            from_date: From date
-            to_date: To date
-            
-        Returns:
-            Order list
-        """
+        """Get list of orders"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -424,41 +288,8 @@ class BreezeClientWrapper:
             logger.error(f"Failed to get orders: {str(e)}")
             return {"success": False, "message": str(e)}
     
-    def get_order_detail(self, order_id: str, exchange: str) -> Dict[str, Any]:
-        """
-        Get order details
-        
-        Args:
-            order_id: Order ID
-            exchange: Exchange code
-            
-        Returns:
-            Order details
-        """
-        if not self.is_connected:
-            return {"success": False, "message": "Not connected"}
-        
-        try:
-            order_detail = self.breeze.get_order_detail(
-                exchange_code=exchange,
-                order_id=order_id
-            )
-            return {"success": True, "data": order_detail}
-        except Exception as e:
-            logger.error(f"Failed to get order detail: {str(e)}")
-            return {"success": False, "message": str(e)}
-    
     def cancel_order(self, order_id: str, exchange: str) -> Dict[str, Any]:
-        """
-        Cancel an order
-        
-        Args:
-            order_id: Order ID to cancel
-            exchange: Exchange code
-            
-        Returns:
-            Cancellation response
-        """
+        """Cancel an order"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -483,21 +314,7 @@ class BreezeClientWrapper:
         stoploss: float = 0,
         validity: str = ""
     ) -> Dict[str, Any]:
-        """
-        Modify an existing order
-        
-        Args:
-            order_id: Order ID
-            exchange: Exchange code
-            quantity: New quantity
-            price: New price
-            order_type: New order type
-            stoploss: New stoploss
-            validity: New validity
-            
-        Returns:
-            Modification response
-        """
+        """Modify an existing order"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
@@ -517,56 +334,45 @@ class BreezeClientWrapper:
             logger.error(f"Failed to modify order: {str(e)}")
             return {"success": False, "message": str(e)}
     
-    def get_trade_list(
+    def get_margin_required(
         self,
-        from_date: str,
-        to_date: str,
-        exchange: str = "",
-        product: str = "",
-        action: str = "",
-        stock_code: str = ""
+        stock_code: str,
+        exchange: str,
+        expiry_date: str,
+        strike_price: int,
+        option_type: str,
+        action: str,
+        quantity: int
     ) -> Dict[str, Any]:
-        """
-        Get trade history
-        
-        Args:
-            from_date: From date
-            to_date: To date
-            exchange: Exchange code
-            product: Product type
-            action: buy/sell
-            stock_code: Stock code
-            
-        Returns:
-            Trade list
-        """
+        """Get margin required for a trade"""
         if not self.is_connected:
             return {"success": False, "message": "Not connected"}
         
         try:
-            trades = self.breeze.get_trade_list(
-                from_date=from_date,
-                to_date=to_date,
+            expiry_dt = datetime.strptime(expiry_date, "%Y-%m-%d")
+            formatted_expiry = expiry_dt.strftime("%d-%b-%Y")
+            
+            right = "call" if option_type.upper() == "CE" else "put"
+            
+            margin = self.breeze.get_margin(
                 exchange_code=exchange,
-                product_type=product,
-                action=action,
-                stock_code=stock_code
+                stock_code=stock_code,
+                product_type="options",
+                right=right,
+                strike_price=str(strike_price),
+                expiry_date=formatted_expiry,
+                quantity=str(quantity),
+                action=action.lower(),
+                order_type="market",
+                price=""
             )
-            return {"success": True, "data": trades}
+            return {"success": True, "data": margin}
         except Exception as e:
-            logger.error(f"Failed to get trades: {str(e)}")
+            logger.error(f"Failed to get margin: {str(e)}")
             return {"success": False, "message": str(e)}
     
     def square_off_all(self, exchange: str = "") -> List[Dict[str, Any]]:
-        """
-        Square off all open positions
-        
-        Args:
-            exchange: Exchange code (optional, "" for all)
-            
-        Returns:
-            List of square off responses
-        """
+        """Square off all open positions"""
         if not self.is_connected:
             return [{"success": False, "message": "Not connected"}]
         
@@ -604,52 +410,3 @@ class BreezeClientWrapper:
                 results.append({"success": False, "message": str(e)})
         
         return results
-    
-    def get_margin_required(
-        self,
-        stock_code: str,
-        exchange: str,
-        expiry_date: str,
-        strike_price: int,
-        option_type: str,
-        action: str,
-        quantity: int
-    ) -> Dict[str, Any]:
-        """
-        Get margin required for a trade
-        
-        Args:
-            stock_code: Stock code
-            exchange: Exchange
-            expiry_date: Expiry date
-            strike_price: Strike price
-            option_type: CE or PE
-            action: buy or sell
-            quantity: Quantity
-            
-        Returns:
-            Margin requirement
-        """
-        if not self.is_connected:
-            return {"success": False, "message": "Not connected"}
-        
-        try:
-            expiry_dt = datetime.strptime(expiry_date, "%Y-%m-%d")
-            formatted_expiry = expiry_dt.strftime("%d-%b-%Y")
-            
-            margin = self.breeze.get_margin(
-                exchange_code=exchange,
-                stock_code=stock_code,
-                product_type="options",
-                right="call" if option_type.upper() == "CE" else "put",
-                strike_price=str(strike_price),
-                expiry_date=formatted_expiry,
-                quantity=str(quantity),
-                action=action.lower(),
-                order_type="market",
-                price=""
-            )
-            return {"success": True, "data": margin}
-        except Exception as e:
-            logger.error(f"Failed to get margin: {str(e)}")
-            return {"success": False, "message": str(e)}
