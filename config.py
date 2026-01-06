@@ -1,23 +1,41 @@
 """
 Configuration settings for Breeze Options Trader
+Updated for Streamlit Cloud deployment
 """
-import os
-from dotenv import load_dotenv
+import streamlit as st
 from datetime import datetime, timedelta
 import pytz
 
-load_dotenv()
 
 class Config:
     """Application configuration"""
     
-    # API Credentials (Store in .env file)
-    API_KEY = os.getenv("BREEZE_API_KEY", "")
-    API_SECRET = os.getenv("BREEZE_API_SECRET", "")
-    SESSION_TOKEN = os.getenv("BREEZE_SESSION_TOKEN", "")
-    
     # Timezone
     IST = pytz.timezone('Asia/Kolkata')
+    
+    @staticmethod
+    def get_api_key():
+        """Get API key from secrets"""
+        try:
+            return st.secrets.get("BREEZE_API_KEY", "")
+        except:
+            return ""
+    
+    @staticmethod
+    def get_api_secret():
+        """Get API secret from secrets"""
+        try:
+            return st.secrets.get("BREEZE_API_SECRET", "")
+        except:
+            return ""
+    
+    @staticmethod
+    def get_session_token():
+        """Get session token from secrets"""
+        try:
+            return st.secrets.get("BREEZE_SESSION_TOKEN", "")
+        except:
+            return ""
     
     # Supported Instruments
     INSTRUMENTS = {
@@ -118,32 +136,34 @@ class Config:
         return expiries
 
 
-class SessionState:
-    """Session state management"""
+def init_session_state():
+    """Initialize Streamlit session state variables"""
+    defaults = {
+        'authenticated': False,
+        'breeze_client': None,
+        'positions': [],
+        'orders': [],
+        'selected_instrument': 'NIFTY',
+        'selected_expiry': None,
+        'selected_strike': None,
+        'selected_option_type': 'CE',
+        'selected_lots': 1,
+        'api_key': '',
+        'api_secret': '',
+        'session_token': '',
+        'last_refresh': None,
+        'option_chain_data': None,
+        'option_chain_cache': None,
+        'option_chain_time': None,
+        'error_message': None,
+        'success_message': None,
+        'warning_message': None,
+        'order_history': [],
+        'trade_log': [],
+        'current_quote': None,
+        'sell_option_type': 'CE'
+    }
     
-    @staticmethod
-    def init_session_state():
-        """Initialize Streamlit session state variables"""
-        import streamlit as st
-        
-        defaults = {
-            'authenticated': False,
-            'breeze_client': None,
-            'positions': [],
-            'orders': [],
-            'selected_instrument': 'NIFTY',
-            'selected_expiry': None,
-            'selected_strike': None,
-            'selected_option_type': 'CE',
-            'api_key': '',
-            'api_secret': '',
-            'session_token': '',
-            'last_refresh': None,
-            'option_chain_data': None,
-            'error_message': None,
-            'success_message': None
-        }
-        
-        for key, value in defaults.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
