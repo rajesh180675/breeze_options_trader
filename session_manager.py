@@ -1,36 +1,21 @@
 """
 Session Manager for Breeze Options Trader
-Handles session state, caching, and persistence
+Streamlit Cloud Compatible - No file-based caching
 """
 
 import streamlit as st
-import json
-import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional
-import hashlib
-import pickle
-from pathlib import Path
 import pytz
 
 
 class SessionManager:
     """
-    Manages user sessions, state persistence, and caching
+    Manages user sessions and state
+    Streamlit Cloud compatible - uses only session_state
     """
     
-    CACHE_DIR = Path(".cache")
-    SESSION_FILE = CACHE_DIR / "session_data.pkl"
     IST = pytz.timezone('Asia/Kolkata')
-    
-    def __init__(self):
-        """Initialize session manager"""
-        self._ensure_cache_dir()
-    
-    def _ensure_cache_dir(self):
-        """Ensure cache directory exists"""
-        if not self.CACHE_DIR.exists():
-            self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     
     @staticmethod
     def init_session_state():
@@ -51,13 +36,17 @@ class SessionManager:
             'selected_strike': None,
             'selected_option_type': 'CE',
             'selected_lots': 1,
+            'sell_option_type': 'CE',
             
             # Data Cache
             'positions': [],
             'orders': [],
             'option_chain_data': None,
+            'option_chain_cache': None,
+            'option_chain_time': None,
             'funds_data': None,
             'last_refresh': None,
+            'current_quote': None,
             
             # UI State
             'current_page': 'Dashboard',
@@ -72,7 +61,6 @@ class SessionManager:
             # Settings
             'auto_refresh': False,
             'refresh_interval': 10,
-            'theme': 'light',
             'notifications_enabled': True,
             
             # Order History (in-memory for current session)
@@ -130,71 +118,6 @@ class SessionManager:
         """Set warning message"""
         st.session_state.warning_message = message
     
-    def save_session(self):
-        """Save session data to file for persistence"""
-        try:
-            session_data = {
-                'api_key': st.session_state.get('api_key', ''),
-                'api_secret': st.session_state.get('api_secret', ''),
-                'session_token': st.session_state.get('session_token', ''),
-                'selected_instrument': st.session_state.get('selected_instrument', 'NIFTY'),
-                'settings': {
-                    'auto_refresh': st.session_state.get('auto_refresh', False),
-                    'refresh_interval': st.session_state.get('refresh_interval', 10),
-                    'theme': st.session_state.get('theme', 'light'),
-                    'notifications_enabled': st.session_state.get('notifications_enabled', True)
-                },
-                'saved_at': datetime.now(self.IST).isoformat()
-            }
-            
-            with open(self.SESSION_FILE, 'wb') as f:
-                pickle.dump(session_data, f)
-            
-            return True
-        except Exception as e:
-            print(f"Failed to save session: {e}")
-            return False
-    
-    def load_session(self) -> Optional[Dict]:
-        """Load session data from file"""
-        try:
-            if self.SESSION_FILE.exists():
-                with open(self.SESSION_FILE, 'rb') as f:
-                    session_data = pickle.load(f)
-                return session_data
-        except Exception as e:
-            print(f"Failed to load session: {e}")
-        return None
-    
-    def restore_session(self) -> bool:
-        """Restore session from saved data"""
-        session_data = self.load_session()
-        
-        if session_data:
-            st.session_state.api_key = session_data.get('api_key', '')
-            st.session_state.api_secret = session_data.get('api_secret', '')
-            st.session_state.session_token = session_data.get('session_token', '')
-            st.session_state.selected_instrument = session_data.get('selected_instrument', 'NIFTY')
-            
-            settings = session_data.get('settings', {})
-            st.session_state.auto_refresh = settings.get('auto_refresh', False)
-            st.session_state.refresh_interval = settings.get('refresh_interval', 10)
-            st.session_state.theme = settings.get('theme', 'light')
-            st.session_state.notifications_enabled = settings.get('notifications_enabled', True)
-            
-            return True
-        return False
-    
-    def clear_saved_session(self):
-        """Clear saved session file"""
-        try:
-            if self.SESSION_FILE.exists():
-                self.SESSION_FILE.unlink()
-            return True
-        except Exception as e:
-            print(f"Failed to clear session: {e}")
-            return False
-    
     @staticmethod
     def is_authenticated() -> bool:
         """Check if user is authenticated"""
@@ -240,21 +163,42 @@ class SessionManager:
         return st.session_state.get('trade_log', [])
 
 
-class DataCache:
+class NotificationManager:
     """
-    Caching mechanism for API data
+    Manages notifications and alerts
     """
     
-    def __init__(self, ttl_seconds: int = 30):
-        """
-        Initialize cache with TTL
+    @staticmethod
+    def show_messages():
+        """Display any pending messages"""
+        if st.session_state.get('error_message'):
+            st.error(st.session_state.error_message)
+            st.session_state.error_message = None
         
-        Args:
-            ttl_seconds: Time-to-live for cache entries in seconds
-        """
-        self.ttl = ttl_seconds
-        self._cache: Dict[str, Dict] = {}
+        if st.session_state.get('success_message'):
+            st.success(st.session_state.success_message)
+            st.session_state.success_message = None
+        
+        if st.session_state.get('warning_message'):
+            st.warning(st.session_state.warning_message)
+            st.session_state.warning_message = None
     
-    def _generate_key(self, *args, **kwargs) -> str:
-        """Generate cache key from arguments"""
-        key_data = 
+    @staticmethod
+    def toast(message: str, icon: str = "ℹ️"):
+        """Show toast notification"""
+        st.toast(f"{icon} {message}")
+    
+    @staticmethod
+    def order_notification(order_type: str, status: str, details: str = ""):
+        """Show order-related notification"""
+        if status == "success":
+            st.toast(f"✅ {order_type} order placed successfully! {details}")
+        elif status == "failed":
+            st.toast(f"❌ {order_type} order failed! {details}")
+        elif status == "pending":
+            st.toast(f"⏳ {order_type} order pending... {details}")
+
+
+# Initialize global instances
+session_manager = SessionManager()
+notification_manager = NotificationManager()
