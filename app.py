@@ -2,25 +2,17 @@
 Breeze Options Trader - Main Application
 ICICI Direct Breeze SDK Options Trading Platform
 
-Author: Enhanced Version
-Features:
-- Robust API response handling
-- Comprehensive error handling
-- Caching for performance
-- Clean separation of concerns
-- Type hints throughout
-- Extensive input validation
+Version: 2.1 - Fixed position type detection
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 from functools import wraps
 import time
 import logging
 
-# Import custom modules
 from app_config import Config, SessionState
 from breeze_client import BreezeClientWrapper
 from utils import Utils, OptionChainAnalyzer
@@ -29,11 +21,9 @@ from utils import Utils, OptionChainAnalyzer
 # CONFIGURATION & SETUP
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page config must be first Streamlit command
 st.set_page_config(
     page_title="Breeze Options Trader",
     page_icon="📈",
@@ -47,7 +37,6 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
-    /* Main header styling */
     .main-header {
         font-size: 2.5rem;
         font-weight: bold;
@@ -56,10 +45,7 @@ CUSTOM_CSS = """
         -webkit-text-fill-color: transparent;
         text-align: center;
         padding: 1rem;
-        margin-bottom: 0;
     }
-    
-    /* Status indicators */
     .status-badge {
         padding: 0.25rem 0.75rem;
         border-radius: 1rem;
@@ -67,44 +53,29 @@ CUSTOM_CSS = """
         font-weight: 600;
     }
     .status-connected { background: #d4edda; color: #155724; }
-    .status-disconnected { background: #f8d7da; color: #721c24; }
-    
-    /* P&L colors */
     .profit { color: #28a745 !important; font-weight: bold; }
     .loss { color: #dc3545 !important; font-weight: bold; }
-    
-    /* Card styling */
+    .position-long { 
+        background: #d4edda; 
+        color: #155724; 
+        padding: 2px 8px; 
+        border-radius: 4px;
+        font-weight: bold;
+    }
+    .position-short { 
+        background: #f8d7da; 
+        color: #721c24; 
+        padding: 2px 8px; 
+        border-radius: 4px;
+        font-weight: bold;
+    }
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 1.5rem;
         border-radius: 0.75rem;
         color: white;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
-    
-    /* Button styling */
     .stButton > button { width: 100%; }
-    
-    /* Order buttons */
-    .sell-button button {
-        background-color: #dc3545 !important;
-        color: white !important;
-    }
-    .buy-button button {
-        background-color: #28a745 !important;
-        color: white !important;
-    }
-    
-    /* Info boxes */
-    .info-box {
-        background: #e7f3ff;
-        border-left: 4px solid #2196F3;
-        padding: 1rem;
-        margin: 1rem 0;
-        border-radius: 0 0.5rem 0.5rem 0;
-    }
-    
-    /* Warning boxes */
     .warning-box {
         background: #fff3cd;
         border-left: 4px solid #ffc107;
@@ -112,31 +83,187 @@ CUSTOM_CSS = """
         margin: 1rem 0;
         border-radius: 0 0.5rem 0.5rem 0;
     }
-    
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Improve dataframe styling */
-    .stDataFrame {
-        border: 1px solid #e0e0e0;
-        border-radius: 0.5rem;
+    .info-box {
+        background: #e7f3ff;
+        border-left: 4px solid #2196F3;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0 0.5rem 0.5rem 0;
+    }
+    .debug-box {
+        background: #f5f5f5;
+        border: 1px solid #ddd;
+        padding: 0.5rem;
+        font-family: monospace;
+        font-size: 0.8rem;
+        overflow-x: auto;
     }
 </style>
 """
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# HELPER CLASSES & FUNCTIONS
+# POSITION TYPE DETECTION - CRITICAL FIX
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def get_position_type(position: Dict[str, Any]) -> str:
+    """
+    Determine if a position is LONG or SHORT.
+    
+    CRITICAL: Breeze API returns POSITIVE quantity for BOTH long and short.
+    We must check the 'action' field to determine actual position type.
+    
+    Long Position (Bought):
+        - action = "buy"
+        - You paid premium
+        - Risk: Limited to premium paid
+        - To close: SELL
+        
+    Short Position (Sold):
+        - action = "sell" 
+        - You received premium
+        - Risk: Unlimited (for calls) / Large (for puts)
+        - To close: BUY
+    
+    Returns: "long" or "short"
+    """
+    
+    # Method 1: Check 'action' field (most reliable for Breeze API)
+    action = str(position.get("action", "")).lower().strip()
+    if action == "sell":
+        return "short"
+    elif action == "buy":
+        return "long"
+    
+    # Method 2: Check 'position_type' field if available
+    pos_type = str(position.get("position_type", "")).lower().strip()
+    if pos_type in ["short", "sell", "sold", "s"]:
+        return "short"
+    elif pos_type in ["long", "buy", "bought", "b"]:
+        return "long"
+    
+    # Method 3: Check buy_quantity vs sell_quantity
+    buy_qty = _safe_int(position.get("buy_quantity", 0))
+    sell_qty = _safe_int(position.get("sell_quantity", 0))
+    
+    if sell_qty > 0 and buy_qty == 0:
+        return "short"
+    elif buy_qty > 0 and sell_qty == 0:
+        return "long"
+    elif sell_qty > buy_qty:
+        return "short"
+    elif buy_qty > sell_qty:
+        return "long"
+    
+    # Method 4: Check open_sell_qty vs open_buy_qty
+    open_sell = _safe_int(position.get("open_sell_qty", 0))
+    open_buy = _safe_int(position.get("open_buy_qty", 0))
+    
+    if open_sell > open_buy:
+        return "short"
+    elif open_buy > open_sell:
+        return "long"
+    
+    # Method 5: Check quantity sign (some APIs use negative for short)
+    qty = _safe_int(position.get("quantity", 0))
+    if qty < 0:
+        return "short"
+    
+    # Method 6: Check segment/product hints
+    segment = str(position.get("segment", "")).lower()
+    if "short" in segment:
+        return "short"
+    
+    # Default fallback - LOG WARNING
+    logger.warning(f"Could not determine position type for: {position}")
+    logger.warning(f"Fields available: {list(position.keys())}")
+    
+    # Conservative default - assume long (safer for display)
+    return "long"
+
+
+def get_square_off_action(position_type: str) -> str:
+    """
+    Get the action needed to square off a position.
+    
+    - Long position → SELL to close
+    - Short position → BUY to close
+    """
+    if position_type == "short":
+        return "buy"
+    else:
+        return "sell"
+
+
+def calculate_position_pnl(
+    position_type: str,
+    avg_price: float,
+    ltp: float,
+    quantity: int
+) -> float:
+    """
+    Calculate P&L based on position type.
+    
+    Long Position:
+        P&L = (Current Price - Avg Price) × Quantity
+        Profit if price goes UP
+        
+    Short Position:
+        P&L = (Avg Price - Current Price) × Quantity
+        Profit if price goes DOWN
+    """
+    qty = abs(quantity)
+    
+    if position_type == "short":
+        # Short: Sold at avg_price, current is ltp
+        # Profit if ltp < avg_price (price dropped)
+        pnl = (avg_price - ltp) * qty
+    else:
+        # Long: Bought at avg_price, current is ltp
+        # Profit if ltp > avg_price (price increased)
+        pnl = (ltp - avg_price) * qty
+    
+    return pnl
+
+
+def _safe_int(value: Any) -> int:
+    """Safely convert value to int."""
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "" or value.lower() == "none":
+                return 0
+        return int(float(value))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    """Safely convert value to float."""
+    if value is None:
+        return 0.0
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "" or value.lower() == "none":
+                return 0.0
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# API RESPONSE HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 class APIResponse:
-    """
-    Wrapper for handling Breeze API responses consistently.
-    Handles the inconsistency where 'Success' can be dict or list.
-    """
+    """Wrapper for handling Breeze API responses consistently."""
     
     def __init__(self, response: Dict[str, Any]):
         self.raw = response
@@ -161,17 +288,15 @@ class APIResponse:
             return success
         elif isinstance(success, list):
             return success[0] if success and isinstance(success[0], dict) else {}
-        else:
-            return {}
+        return {}
     
     @property
     def data(self) -> Dict[str, Any]:
-        """Get parsed data as dictionary."""
         return self._data
     
     @property
     def data_list(self) -> List[Dict[str, Any]]:
-        """Get data as list (for endpoints that return lists)."""
+        """Get data as list."""
         if not self.success:
             return []
         
@@ -185,30 +310,29 @@ class APIResponse:
             return success
         elif isinstance(success, dict):
             return [success]
-        else:
-            return []
+        return []
     
     def get(self, key: str, default: Any = None) -> Any:
-        """Get a specific field from data."""
         return self._data.get(key, default)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# STATE MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 class StateManager:
-    """
-    Centralized state management for the application.
-    Provides type-safe access to session state.
-    """
+    """Centralized state management."""
     
     @staticmethod
     def init():
-        """Initialize all session state variables."""
         SessionState.init_session_state()
-        
-        # Additional state for caching
         if "option_chain_cache" not in st.session_state:
             st.session_state.option_chain_cache = {}
         if "cache_timestamp" not in st.session_state:
             st.session_state.cache_timestamp = {}
+        if "debug_mode" not in st.session_state:
+            st.session_state.debug_mode = False
     
     @staticmethod
     def is_authenticated() -> bool:
@@ -239,25 +363,21 @@ class StateManager:
     
     @staticmethod
     def cache_option_chain(key: str, data: pd.DataFrame, ttl_seconds: int = 30):
-        """Cache option chain data with TTL."""
         st.session_state.option_chain_cache[key] = data
         st.session_state.cache_timestamp[key] = datetime.now()
     
     @staticmethod
     def get_cached_option_chain(key: str, ttl_seconds: int = 30) -> Optional[pd.DataFrame]:
-        """Get cached option chain if not expired."""
         if key not in st.session_state.option_chain_cache:
             return None
-        
         timestamp = st.session_state.cache_timestamp.get(key)
         if timestamp and (datetime.now() - timestamp).seconds < ttl_seconds:
             return st.session_state.option_chain_cache[key]
-        
         return None
 
 
 def handle_api_error(func):
-    """Decorator for handling API errors gracefully."""
+    """Decorator for handling API errors."""
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
@@ -269,96 +389,32 @@ def handle_api_error(func):
     return wrapper
 
 
-def validate_strike_price(strike: int, strike_gap: int) -> bool:
-    """Validate that strike price is valid for the instrument."""
-    if strike <= 0:
-        return False
-    if strike % strike_gap != 0:
-        return False
-    return True
-
-
-def validate_quantity(quantity: int, lot_size: int) -> bool:
-    """Validate that quantity is a multiple of lot size."""
-    if quantity <= 0:
-        return False
-    if quantity % lot_size != 0:
-        return False
-    return True
-
-
-def format_pnl(value: float) -> str:
-    """Format P&L with color indicator."""
-    if value >= 0:
-        return f'<span class="profit">+₹{value:,.2f}</span>'
-    else:
-        return f'<span class="loss">-₹{abs(value):,.2f}</span>'
-
-
-def get_atm_strike(spot_price: float, strike_gap: int) -> int:
-    """Calculate ATM strike price."""
-    return round(spot_price / strike_gap) * strike_gap
-
-
-def generate_strike_range(atm_strike: int, strike_gap: int, count: int = 10) -> List[int]:
-    """Generate a range of strikes around ATM."""
-    strikes = []
-    for i in range(-count, count + 1):
-        strikes.append(atm_strike + (i * strike_gap))
-    return strikes
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# UI COMPONENTS
+# UI COMPONENTS - HEADER & SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def render_header():
-    """Render the application header."""
-    st.markdown(
-        '<h1 class="main-header">📈 Breeze Options Trader</h1>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<h1 class="main-header">📈 Breeze Options Trader</h1>', unsafe_allow_html=True)
     st.markdown("---")
 
 
 def render_login_form():
-    """Render the login form in the sidebar."""
     with st.form("login_form", clear_on_submit=False):
         st.subheader("🔐 API Credentials")
         
         api_key, api_secret, session_token = StateManager.get_credentials()
         
-        new_api_key = st.text_input(
-            "API Key",
-            value=api_key,
-            type="password",
-            placeholder="Enter your API Key",
-            help="Your ICICI Direct Breeze API Key"
-        )
-        
-        new_api_secret = st.text_input(
-            "API Secret",
-            value=api_secret,
-            type="password",
-            placeholder="Enter your API Secret",
-            help="Your ICICI Direct Breeze API Secret"
-        )
-        
-        new_session_token = st.text_input(
-            "Session Token",
-            value=session_token,
-            type="password",
-            placeholder="Enter your Session Token",
-            help="Daily session token from ICICI Direct"
-        )
+        new_api_key = st.text_input("API Key", value=api_key, type="password")
+        new_api_secret = st.text_input("API Secret", value=api_secret, type="password")
+        new_session_token = st.text_input("Session Token", value=session_token, type="password")
         
         st.markdown("""
         <div class="info-box">
-            <strong>💡 How to get Session Token:</strong><br>
-            1. Login to <a href="https://www.icicidirect.com/" target="_blank">ICICI Direct</a><br>
+            <strong>💡 Get Session Token:</strong><br>
+            1. Login to ICICI Direct<br>
             2. Go to API section<br>
-            3. Generate and copy session token
+            3. Generate session token
         </div>
         """, unsafe_allow_html=True)
         
@@ -366,187 +422,98 @@ def render_login_form():
         
         if submitted:
             if not all([new_api_key, new_api_secret, new_session_token]):
-                st.warning("⚠️ Please fill in all credentials")
+                st.warning("⚠️ Please fill all credentials")
                 return
             
-            with st.spinner("🔄 Connecting to Breeze API..."):
+            with st.spinner("🔄 Connecting..."):
                 client = BreezeClientWrapper(new_api_key, new_api_secret)
                 result = client.connect(new_session_token)
                 
                 if result.get("success"):
                     StateManager.set_authenticated(True, client)
                     StateManager.set_credentials(new_api_key, new_api_secret, new_session_token)
-                    st.success("✅ Connected successfully!")
+                    st.success("✅ Connected!")
                     time.sleep(0.5)
                     st.rerun()
                 else:
-                    error_msg = result.get("message", "Unknown error")
-                    st.error(f"❌ Connection failed: {error_msg}")
-                    logger.error(f"Login failed: {error_msg}")
+                    st.error(f"❌ Failed: {result.get('message', 'Unknown error')}")
 
 
 def render_authenticated_sidebar():
-    """Render sidebar content for authenticated users."""
     client = StateManager.get_client()
     if not client:
         return
     
-    # Connection status
-    st.markdown(
-        '<span class="status-badge status-connected">✅ Connected</span>',
-        unsafe_allow_html=True
-    )
-    
+    st.markdown('<span class="status-badge status-connected">✅ Connected</span>', unsafe_allow_html=True)
     st.markdown("---")
     
     # User info
     st.subheader("👤 Account")
-    
     try:
         customer_response = APIResponse(client.get_customer_details())
         if customer_response.success:
             name = customer_response.get("name", "User")
-            client_code = customer_response.get("client_code", "")
             st.markdown(f"**{name}**")
-            if client_code:
-                st.caption(f"Client: {client_code}")
-        else:
-            st.markdown("**User**")
-    except Exception as e:
-        logger.error(f"Failed to get customer details: {e}")
+    except Exception:
         st.markdown("**User**")
     
-    # Market status
     st.markdown(f"**{Utils.get_market_status()}**")
-    
     st.markdown("---")
     
     # Funds
     st.subheader("💰 Funds")
-    
     try:
         funds_response = APIResponse(client.get_funds())
         if funds_response.success:
-            available = float(funds_response.get("available_margin", 0))
-            used = float(funds_response.get("utilized_margin", 0))
-            total = available + used
+            available = _safe_float(funds_response.get("available_margin", 0))
+            used = _safe_float(funds_response.get("utilized_margin", 0))
             
             col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Available", Utils.format_currency(available))
-            with col2:
-                st.metric("Used", Utils.format_currency(used))
-            
-            # Progress bar for margin utilization
-            if total > 0:
-                utilization = (used / total) * 100
-                st.progress(min(utilization / 100, 1.0))
-                st.caption(f"Utilization: {utilization:.1f}%")
-        else:
-            st.info("Unable to fetch funds")
-    except Exception as e:
-        logger.error(f"Failed to get funds: {e}")
+            col1.metric("Available", Utils.format_currency(available))
+            col2.metric("Used", Utils.format_currency(used))
+    except Exception:
         st.info("Unable to fetch funds")
     
     st.markdown("---")
     
-    # Disconnect button
-    if st.button("🔓 Disconnect", use_container_width=True, type="secondary"):
+    if st.button("🔓 Disconnect", use_container_width=True):
         StateManager.set_authenticated(False, None)
         st.rerun()
 
 
 def render_settings():
-    """Render settings section."""
     st.subheader("⚙️ Settings")
     
-    selected_instrument = st.selectbox(
+    st.selectbox(
         "Default Instrument",
         options=list(Config.INSTRUMENTS.keys()),
-        key="selected_instrument",
-        help="Select your preferred trading instrument"
+        key="selected_instrument"
     )
     
-    # Display instrument info
-    inst_config = Config.INSTRUMENTS[selected_instrument]
-    with st.expander("ℹ️ Instrument Info"):
-        st.markdown(f"""
-        - **Exchange:** {inst_config['exchange']}
-        - **Lot Size:** {inst_config['lot_size']}
-        - **Strike Gap:** {inst_config['strike_gap']}
-        - **Expiry Day:** {Config.EXPIRY_DAYS.get(selected_instrument, 'N/A')}
-        """)
+    # Debug mode toggle
+    debug_mode = st.checkbox("🔧 Debug Mode", value=st.session_state.get("debug_mode", False))
+    st.session_state.debug_mode = debug_mode
     
-    # Auto-refresh settings
-    auto_refresh = st.checkbox("Auto Refresh", value=False, help="Auto-refresh data")
-    if auto_refresh:
-        refresh_interval = st.slider("Interval (sec)", 5, 60, 10)
-        st.caption(f"Data will refresh every {refresh_interval} seconds")
+    if debug_mode:
+        st.caption("Debug mode shows raw API data")
 
 
 def render_welcome_page():
-    """Render welcome page for unauthenticated users."""
     st.markdown("""
     <div style="text-align: center; padding: 2rem;">
         <h2>Welcome to Breeze Options Trader</h2>
-        <p style="color: #666; font-size: 1.1rem;">
-            A powerful platform for trading index options on ICICI Direct
-        </p>
+        <p style="color: #666;">Trade index options on ICICI Direct</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Features grid
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("""
-        ### 📊 Real-time Data
-        - Live option chain
-        - Real-time quotes
-        - Open Interest analysis
-        - Put-Call Ratio
-        - Max Pain calculation
-        """)
-    
+        st.markdown("### 📊 Real-time Data\n- Option chain\n- Live quotes\n- OI Analysis")
     with col2:
-        st.markdown("""
-        ### 💰 Easy Trading
-        - Sell Call options
-        - Sell Put options
-        - Quick square off
-        - Position management
-        - Order tracking
-        """)
-    
+        st.markdown("### 💰 Trading\n- Sell options\n- Square off\n- Order management")
     with col3:
-        st.markdown("""
-        ### 🛡️ Risk Management
-        - Margin calculator
-        - P&L tracking
-        - Position limits
-        - Risk warnings
-        - Order confirmations
-        """)
-    
-    st.markdown("---")
-    
-    # Supported instruments
-    st.subheader("📈 Supported Instruments")
-    
-    instruments_df = pd.DataFrame([
-        {
-            "Instrument": name,
-            "Exchange": cfg["exchange"],
-            "Lot Size": cfg["lot_size"],
-            "Strike Gap": cfg["strike_gap"],
-            "Expiry": Config.EXPIRY_DAYS.get(name, "N/A")
-        }
-        for name, cfg in Config.INSTRUMENTS.items()
-    ])
-    
-    st.dataframe(instruments_df, use_container_width=True, hide_index=True)
-    
-    st.markdown("---")
+        st.markdown("### 🛡️ Risk Mgmt\n- Margin calc\n- P&L tracking\n- Position monitoring")
     
     st.info("👈 **Login using the sidebar to start trading**")
 
@@ -558,126 +525,65 @@ def render_welcome_page():
 
 @handle_api_error
 def render_dashboard_tab():
-    """Render the main dashboard tab with option chain."""
     client = StateManager.get_client()
     if not client:
-        st.error("Not connected")
         return
     
-    # Controls row
     col1, col2, col3 = st.columns([2, 2, 1])
     
     with col1:
-        instrument = st.selectbox(
-            "Select Instrument",
-            options=list(Config.INSTRUMENTS.keys()),
-            key="dashboard_instrument"
-        )
+        instrument = st.selectbox("Instrument", list(Config.INSTRUMENTS.keys()), key="dash_instrument")
     
     inst_config = Config.INSTRUMENTS[instrument]
     expiries = Config.get_next_expiries(instrument, 5)
     
     with col2:
-        selected_expiry = st.selectbox(
-            "Select Expiry",
-            options=expiries,
-            format_func=Utils.format_expiry_date,
-            key="dashboard_expiry"
-        )
+        selected_expiry = st.selectbox("Expiry", expiries, format_func=Utils.format_expiry_date, key="dash_expiry")
     
     with col3:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh_clicked = st.button("🔄 Refresh", use_container_width=True)
+        refresh = st.button("🔄 Refresh", use_container_width=True)
     
-    # Cache key for option chain
     cache_key = f"{instrument}_{selected_expiry}"
-    
-    # Check cache first (unless refresh clicked)
-    cached_df = None if refresh_clicked else StateManager.get_cached_option_chain(cache_key)
+    cached_df = None if refresh else StateManager.get_cached_option_chain(cache_key)
     
     if cached_df is not None:
         df = cached_df
-        st.caption("📦 Using cached data (refreshes every 30 seconds)")
+        st.caption("📦 Cached data")
     else:
-        # Fetch fresh data
-        with st.spinner("Loading option chain..."):
-            option_chain = client.get_option_chain(
-                stock_code=inst_config["stock_code"],
-                exchange=inst_config["exchange"],
-                expiry_date=selected_expiry
-            )
+        with st.spinner("Loading..."):
+            option_chain = client.get_option_chain(inst_config["stock_code"], inst_config["exchange"], selected_expiry)
         
         response = APIResponse(option_chain)
-        
         if not response.success:
-            st.error(f"Failed to load option chain: {response.message}")
+            st.error(f"Failed: {response.message}")
             return
         
         df = OptionChainAnalyzer.process_option_chain(option_chain.get("data", {}))
-        
         if df.empty:
-            st.warning("No option chain data available")
+            st.warning("No data available")
             return
         
-        # Cache the data
         StateManager.cache_option_chain(cache_key, df)
     
-    # Display header
-    st.subheader(f"📈 {instrument} Option Chain - {Utils.format_expiry_date(selected_expiry)}")
+    st.subheader(f"📈 {instrument} Option Chain")
     
-    # Metrics row
     col1, col2, col3, col4 = st.columns(4)
-    
     pcr = OptionChainAnalyzer.calculate_pcr(df)
     max_pain = OptionChainAnalyzer.get_max_pain(df, inst_config["strike_gap"])
     
-    total_call_oi = df[df['right'] == 'Call']['open_interest'].sum() if 'right' in df.columns else 0
-    total_put_oi = df[df['right'] == 'Put']['open_interest'].sum() if 'right' in df.columns else 0
+    col1.metric("PCR", f"{pcr:.2f}", delta="Bullish" if pcr > 1 else "Bearish")
+    col2.metric("Max Pain", f"{max_pain:,}")
     
-    with col1:
-        pcr_delta = "Bullish" if pcr > 1 else "Bearish" if pcr < 1 else "Neutral"
-        st.metric("Put-Call Ratio", f"{pcr:.2f}", delta=pcr_delta)
+    if 'right' in df.columns:
+        col3.metric("Call OI", f"{df[df['right']=='Call']['open_interest'].sum():,.0f}")
+        col4.metric("Put OI", f"{df[df['right']=='Put']['open_interest'].sum():,.0f}")
     
-    with col2:
-        st.metric("Max Pain", f"{max_pain:,}")
+    display_cols = ['strike_price', 'right', 'ltp', 'open_interest', 'volume', 'best_bid_price', 'best_offer_price']
+    available_cols = [c for c in display_cols if c in df.columns]
     
-    with col3:
-        st.metric("Total Call OI", f"{total_call_oi:,.0f}")
-    
-    with col4:
-        st.metric("Total Put OI", f"{total_put_oi:,.0f}")
-    
-    st.markdown("---")
-    
-    # Option chain table
-    display_columns = ['strike_price', 'right', 'ltp', 'open_interest', 'volume', 
-                       'best_bid_price', 'best_offer_price', 'ltp_percent_change']
-    available_columns = [col for col in display_columns if col in df.columns]
-    
-    if available_columns:
-        display_df = df[available_columns].copy()
-        
-        # Rename columns for better display
-        column_names = {
-            'strike_price': 'Strike',
-            'right': 'Type',
-            'ltp': 'LTP',
-            'open_interest': 'OI',
-            'volume': 'Volume',
-            'best_bid_price': 'Bid',
-            'best_offer_price': 'Ask',
-            'ltp_percent_change': 'Change %'
-        }
-        display_df = display_df.rename(columns=column_names)
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            height=400,
-            hide_index=True
-        )
-    else:
-        st.dataframe(df, use_container_width=True, height=400)
+    if available_cols:
+        st.dataframe(df[available_cols], use_container_width=True, height=400, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -687,260 +593,109 @@ def render_dashboard_tab():
 
 @handle_api_error
 def render_sell_options_tab():
-    """Render the sell options tab."""
     client = StateManager.get_client()
     if not client:
-        st.error("Not connected")
         return
     
     st.subheader("💰 Sell Options")
     
-    # Two-column layout
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("#### Contract Selection")
-        
-        # Instrument
-        instrument = st.selectbox(
-            "Instrument",
-            options=list(Config.INSTRUMENTS.keys()),
-            key="sell_instrument"
-        )
+        instrument = st.selectbox("Instrument", list(Config.INSTRUMENTS.keys()), key="sell_instrument")
         inst_config = Config.INSTRUMENTS[instrument]
         
-        # Expiry
         expiries = Config.get_next_expiries(instrument, 5)
-        expiry = st.selectbox(
-            "Expiry Date",
-            options=expiries,
-            format_func=Utils.format_expiry_date,
-            key="sell_expiry"
-        )
+        expiry = st.selectbox("Expiry", expiries, format_func=Utils.format_expiry_date, key="sell_expiry")
         
-        # Option type
-        option_type = st.radio(
-            "Option Type",
-            options=["CE (Call)", "PE (Put)"],
-            horizontal=True,
-            key="sell_option_type"
-        )
-        option_type_code = "CE" if "CE" in option_type else "PE"
+        option_type = st.radio("Option Type", ["CE (Call)", "PE (Put)"], horizontal=True, key="sell_opt_type")
+        option_code = "CE" if "CE" in option_type else "PE"
         
-        # Strike price with validation
-        strike_price = st.number_input(
-            "Strike Price",
-            min_value=0,
-            step=inst_config["strike_gap"],
-            value=0,
-            key="sell_strike",
-            help=f"Must be a multiple of {inst_config['strike_gap']}"
-        )
-        
-        # Validation
-        if strike_price > 0 and strike_price % inst_config["strike_gap"] != 0:
-            st.warning(f"⚠️ Strike should be a multiple of {inst_config['strike_gap']}")
+        strike = st.number_input("Strike Price", min_value=0, step=inst_config["strike_gap"], key="sell_strike")
     
     with col2:
-        st.markdown("#### Order Details")
-        
-        # Lots
-        lots = st.number_input(
-            "Number of Lots",
-            min_value=1,
-            max_value=100,
-            value=1,
-            key="sell_lots"
-        )
-        
+        lots = st.number_input("Lots", min_value=1, max_value=100, value=1, key="sell_lots")
         quantity = lots * inst_config["lot_size"]
         
-        st.info(f"""
-        **Order Summary:**
-        - Lots: {lots}
-        - Lot Size: {inst_config['lot_size']}
-        - **Total Quantity: {quantity}**
-        """)
+        st.info(f"**Qty:** {quantity} ({lots} × {inst_config['lot_size']})")
         
-        # Order type
-        order_type = st.radio(
-            "Order Type",
-            options=["Market", "Limit"],
-            horizontal=True,
-            key="sell_order_type"
-        )
-        
-        # Limit price (only if limit order)
+        order_type = st.radio("Order Type", ["Market", "Limit"], horizontal=True, key="sell_order_type")
         limit_price = 0.0
         if order_type == "Limit":
-            limit_price = st.number_input(
-                "Limit Price (₹)",
-                min_value=0.0,
-                step=0.05,
-                format="%.2f",
-                key="sell_limit_price"
-            )
-            if limit_price <= 0:
-                st.warning("⚠️ Please enter a valid limit price")
+            limit_price = st.number_input("Limit Price", min_value=0.0, step=0.05, key="sell_price")
     
     st.markdown("---")
     
-    # Action buttons row
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📊 Get Quote", use_container_width=True, disabled=strike_price <= 0):
-            with st.spinner("Fetching quote..."):
-                quote = client.get_quotes(
-                    stock_code=inst_config["stock_code"],
-                    exchange=inst_config["exchange"],
-                    expiry_date=expiry,
-                    strike_price=strike_price,
-                    option_type=option_type_code
-                )
-                
+        if st.button("📊 Get Quote", use_container_width=True, disabled=strike <= 0):
+            with st.spinner("Fetching..."):
+                quote = client.get_quotes(inst_config["stock_code"], inst_config["exchange"], expiry, strike, option_code)
                 response = APIResponse(quote)
-                
                 if response.success:
-                    # Handle list response for quotes
-                    quote_data = response.data_list[0] if response.data_list else response.data
-                    
-                    ltp = quote_data.get('ltp', 'N/A')
-                    bid = quote_data.get('best_bid_price', 'N/A')
-                    ask = quote_data.get('best_offer_price', 'N/A')
-                    
-                    st.success(f"""
-                    **Quote Retrieved:**
-                    - **LTP:** ₹{ltp}
-                    - **Bid:** ₹{bid}
-                    - **Ask:** ₹{ask}
-                    """)
+                    qdata = response.data_list[0] if response.data_list else response.data
+                    st.success(f"**LTP:** ₹{qdata.get('ltp', 'N/A')} | **Bid:** ₹{qdata.get('best_bid_price', 'N/A')} | **Ask:** ₹{qdata.get('best_offer_price', 'N/A')}")
                 else:
-                    st.error(f"Failed to get quote: {response.message}")
+                    st.error(response.message)
     
     with col2:
-        if st.button("💰 Calculate Margin", use_container_width=True, disabled=strike_price <= 0):
-            with st.spinner("Calculating margin..."):
-                margin = client.get_margin_required(
-                    stock_code=inst_config["stock_code"],
-                    exchange=inst_config["exchange"],
-                    expiry_date=expiry,
-                    strike_price=strike_price,
-                    option_type=option_type_code,
-                    action="sell",
-                    quantity=quantity
-                )
-                
+        if st.button("💰 Margin", use_container_width=True, disabled=strike <= 0):
+            with st.spinner("Calculating..."):
+                margin = client.get_margin_required(inst_config["stock_code"], inst_config["exchange"], expiry, strike, option_code, "sell", quantity)
                 response = APIResponse(margin)
-                
                 if response.success:
-                    required_margin = response.get('required_margin', 'N/A')
-                    st.info(f"**Required Margin:** ₹{required_margin}")
+                    st.info(f"**Required Margin:** ₹{response.get('required_margin', 'N/A')}")
                 else:
-                    st.warning("Could not calculate margin")
+                    st.warning("Could not calculate")
     
-    st.markdown("---")
-    
-    # Risk warning
     st.markdown("""
     <div class="warning-box">
-        <strong>⚠️ RISK WARNING</strong><br>
-        You are about to <strong>SELL</strong> an option. Option selling carries 
-        <strong>unlimited risk potential</strong>. Ensure you understand the risks 
-        and have adequate margin before proceeding.
+        <strong>⚠️ RISK WARNING:</strong> Option selling has <strong>UNLIMITED RISK</strong> potential.
     </div>
     """, unsafe_allow_html=True)
     
-    # Confirmation and order placement
-    confirm = st.checkbox(
-        "I understand the risks and confirm the order details",
-        key="sell_confirm"
-    )
+    confirm = st.checkbox("I understand the risks", key="sell_confirm")
     
-    # Validate before enabling button
-    can_place_order = (
-        confirm and 
-        strike_price > 0 and 
-        strike_price % inst_config["strike_gap"] == 0 and
-        (order_type == "Market" or limit_price > 0)
-    )
+    can_order = confirm and strike > 0 and (order_type == "Market" or limit_price > 0)
     
-    if st.button(
-        f"🔴 SELL {option_type_code}",
-        type="primary",
-        use_container_width=True,
-        disabled=not can_place_order
-    ):
+    if st.button(f"🔴 SELL {option_code}", type="primary", use_container_width=True, disabled=not can_order):
         with st.spinner("Placing order..."):
-            if option_type_code == "CE":
-                result = client.sell_call(
-                    stock_code=inst_config["stock_code"],
-                    exchange=inst_config["exchange"],
-                    expiry_date=expiry,
-                    strike_price=strike_price,
-                    quantity=quantity,
-                    order_type=order_type.lower(),
-                    price=limit_price
-                )
-            else:
-                result = client.sell_put(
-                    stock_code=inst_config["stock_code"],
-                    exchange=inst_config["exchange"],
-                    expiry_date=expiry,
-                    strike_price=strike_price,
-                    quantity=quantity,
-                    order_type=order_type.lower(),
-                    price=limit_price
-                )
+            fn = client.sell_call if option_code == "CE" else client.sell_put
+            result = fn(inst_config["stock_code"], inst_config["exchange"], expiry, strike, quantity, order_type.lower(), limit_price)
             
             response = APIResponse(result)
-            
             if response.success:
-                order_id = response.get('order_id', 'N/A')
-                message = response.get('message', 'Order submitted')
-                
-                st.success(f"""
-                ✅ **Order Placed Successfully!**
-                
-                - **Order ID:** {order_id}
-                - **Status:** {message}
-                - **Contract:** {instrument} {strike_price} {option_type_code}
-                - **Quantity:** {quantity}
-                """)
+                st.success(f"✅ Order placed! ID: {response.get('order_id', 'N/A')}")
                 st.balloons()
-                
-                logger.info(f"Order placed: {order_id}")
             else:
-                st.error(f"❌ Order failed: {response.message}")
-                logger.error(f"Order failed: {response.message}")
+                st.error(f"❌ Failed: {response.message}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SQUARE OFF TAB
+# SQUARE OFF TAB - FIXED POSITION TYPE DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 @handle_api_error
 def render_square_off_tab():
-    """Render the square off positions tab."""
     client = StateManager.get_client()
     if not client:
-        st.error("Not connected")
         return
     
     st.subheader("🔄 Square Off Positions")
     
-    # Fetch positions
+    debug_mode = st.session_state.get("debug_mode", False)
+    
     with st.spinner("Loading positions..."):
         positions = client.get_portfolio_positions()
     
     response = APIResponse(positions)
     
     if not response.success:
-        st.error(f"Failed to load positions: {response.message}")
+        st.error(f"Failed: {response.message}")
         return
     
-    # Get positions list
     position_list = response.data_list
     
     if not position_list:
@@ -948,30 +703,37 @@ def render_square_off_tab():
         return
     
     # Filter option positions with non-zero quantity
-    option_positions = [
-        p for p in position_list
-        if (p.get("product_type", "").lower() == "options" and 
-            int(p.get("quantity", 0)) != 0)
-    ]
+    option_positions = []
+    for p in position_list:
+        product = str(p.get("product_type", "")).lower()
+        qty = _safe_int(p.get("quantity", 0))
+        
+        if product == "options" and qty != 0:
+            # CRITICAL: Determine position type correctly
+            pos_type = get_position_type(p)
+            p["_position_type"] = pos_type
+            p["_quantity"] = abs(qty)
+            option_positions.append(p)
     
     if not option_positions:
-        st.info("📭 No open option positions to square off")
+        st.info("📭 No open option positions")
         return
     
-    st.success(f"Found **{len(option_positions)}** open option position(s)")
+    st.success(f"Found **{len(option_positions)}** open position(s)")
     
-    # Display positions table
+    # Display positions with correct type
     display_data = []
     for p in option_positions:
-        qty = int(p.get("quantity", 0))
-        avg = float(p.get("average_price", 0))
-        ltp = float(p.get("ltp", avg))
+        pos_type = p["_position_type"]
+        qty = p["_quantity"]
+        avg = _safe_float(p.get("average_price", 0))
+        ltp = _safe_float(p.get("ltp", avg))
         
-        # Calculate P&L
-        if qty > 0:  # Long
-            pnl = (ltp - avg) * qty
-        else:  # Short
-            pnl = (avg - ltp) * abs(qty)
+        # Calculate P&L correctly based on position type
+        pnl = calculate_position_pnl(pos_type, avg, ltp, qty)
+        
+        # Action needed to square off
+        sq_action = get_square_off_action(pos_type)
         
         display_data.append({
             "Instrument": p.get("stock_code", ""),
@@ -979,82 +741,102 @@ def render_square_off_tab():
             "Type": p.get("right", ""),
             "Expiry": p.get("expiry_date", ""),
             "Qty": qty,
-            "Avg Price": f"₹{avg:.2f}",
+            "Position": pos_type.upper(),
+            "Avg": f"₹{avg:.2f}",
             "LTP": f"₹{ltp:.2f}",
             "P&L": f"₹{pnl:+,.2f}",
-            "Position": "Long" if qty > 0 else "Short"
+            "Action": sq_action.upper()
         })
     
     df = pd.DataFrame(display_data)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    # Style the dataframe
+    def style_position(val):
+        if val == "LONG":
+            return "background-color: #d4edda; color: #155724; font-weight: bold"
+        elif val == "SHORT":
+            return "background-color: #f8d7da; color: #721c24; font-weight: bold"
+        return ""
+    
+    def style_pnl(val):
+        if isinstance(val, str) and val.startswith("₹"):
+            if "+" in val:
+                return "color: #28a745; font-weight: bold"
+            elif "-" in val and not val.startswith("₹+"):
+                return "color: #dc3545; font-weight: bold"
+        return ""
+    
+    def style_action(val):
+        if val == "BUY":
+            return "background-color: #28a745; color: white; font-weight: bold"
+        elif val == "SELL":
+            return "background-color: #dc3545; color: white; font-weight: bold"
+        return ""
+    
+    styled_df = df.style.applymap(style_position, subset=["Position"])
+    styled_df = styled_df.applymap(style_pnl, subset=["P&L"])
+    styled_df = styled_df.applymap(style_action, subset=["Action"])
+    
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    
+    # Debug info
+    if debug_mode:
+        st.markdown("### 🔧 Debug: Raw Position Data")
+        for i, p in enumerate(option_positions):
+            with st.expander(f"Position {i+1}: {p.get('stock_code')} {p.get('strike_price')}"):
+                st.json({k: v for k, v in p.items() if not k.startswith("_")})
     
     st.markdown("---")
     
     # Individual square off
     st.markdown("#### Square Off Individual Position")
     
-    position_labels = [
-        f"{p['stock_code']} {p['strike_price']} {p['right']} | Qty: {p['quantity']}"
-        for p in option_positions
-    ]
+    position_labels = []
+    for i, p in enumerate(option_positions):
+        pos_type = p["_position_type"]
+        sq_action = get_square_off_action(pos_type)
+        label = f"{p['stock_code']} {p['strike_price']} {p['right']} | {pos_type.upper()} | Qty: {p['_quantity']} | Action: {sq_action.upper()}"
+        position_labels.append(label)
     
-    selected_idx = st.selectbox(
-        "Select Position",
-        options=range(len(position_labels)),
-        format_func=lambda x: position_labels[x],
-        key="squareoff_position"
-    )
+    selected_idx = st.selectbox("Select Position", range(len(position_labels)), format_func=lambda x: position_labels[x])
     
     selected_pos = option_positions[selected_idx]
-    qty = abs(int(selected_pos.get("quantity", 0)))
-    position_type = "long" if int(selected_pos.get("quantity", 0)) > 0 else "short"
+    pos_type = selected_pos["_position_type"]
+    qty = selected_pos["_quantity"]
+    sq_action = get_square_off_action(pos_type)
+    
+    # Show clear info about what will happen
+    if pos_type == "short":
+        st.info(f"📌 This is a **SHORT** position. To close, we will **BUY** {qty} units.")
+    else:
+        st.info(f"📌 This is a **LONG** position. To close, we will **SELL** {qty} units.")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        sq_order_type = st.radio(
-            "Order Type",
-            options=["Market", "Limit"],
-            horizontal=True,
-            key="sq_order_type"
-        )
+        sq_order_type = st.radio("Order Type", ["Market", "Limit"], horizontal=True, key="sq_otype")
     
     with col2:
         sq_limit_price = 0.0
         if sq_order_type == "Limit":
-            sq_limit_price = st.number_input(
-                "Limit Price",
-                min_value=0.0,
-                step=0.05,
-                key="sq_limit_price"
-            )
+            sq_limit_price = st.number_input("Limit Price", min_value=0.0, step=0.05, key="sq_price")
     
-    sq_qty = st.slider(
-        "Quantity to Square Off",
-        min_value=1,
-        max_value=qty,
-        value=qty,
-        key="sq_qty"
-    )
+    sq_qty = st.slider("Quantity", min_value=1, max_value=qty, value=qty, key="sq_qty")
     
-    action_text = "BUY" if position_type == "short" else "SELL"
-    action_color = "buy-button" if position_type == "short" else "sell-button"
+    # Button with correct action
+    button_label = f"🔄 {sq_action.upper()} {sq_qty} to Close"
+    button_color = "primary"
     
-    st.markdown(f'<div class="{action_color}">', unsafe_allow_html=True)
-    if st.button(
-        f"🔄 Square Off ({action_text} {sq_qty})",
-        type="primary",
-        use_container_width=True
-    ):
-        with st.spinner("Squaring off position..."):
+    if st.button(button_label, type=button_color, use_container_width=True):
+        with st.spinner(f"Executing {sq_action.upper()} order..."):
             result = client.square_off_position(
                 stock_code=selected_pos.get("stock_code"),
                 exchange=selected_pos.get("exchange_code"),
                 expiry_date=selected_pos.get("expiry_date"),
-                strike_price=int(selected_pos.get("strike_price", 0)),
-                option_type=selected_pos.get("right", "").upper(),
+                strike_price=_safe_int(selected_pos.get("strike_price", 0)),
+                option_type=str(selected_pos.get("right", "")).upper(),
                 quantity=sq_qty,
-                current_position=position_type,
+                current_position=pos_type,  # Pass the correct position type
                 order_type=sq_order_type.lower(),
                 price=sq_limit_price
             )
@@ -1062,48 +844,33 @@ def render_square_off_tab():
             response = APIResponse(result)
             
             if response.success:
-                st.success("✅ Position squared off successfully!")
+                st.success(f"✅ {sq_action.upper()} order executed successfully!")
                 time.sleep(1)
                 st.rerun()
             else:
-                st.error(f"❌ Square off failed: {response.message}")
-    st.markdown('</div>', unsafe_allow_html=True)
+                st.error(f"❌ Failed: {response.message}")
     
     st.markdown("---")
     
     # Square off all
-    st.markdown("#### ⚡ Emergency: Square Off All")
+    st.markdown("#### ⚡ Square Off All")
+    st.warning("⚠️ This will close ALL positions at market price!")
     
-    st.warning("⚠️ This will close **ALL** open option positions at market price!")
+    confirm_all = st.checkbox("I confirm", key="sq_all_confirm")
     
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        confirm_all = st.checkbox(
-            "I confirm I want to square off ALL positions",
-            key="confirm_square_all"
-        )
-    
-    with col2:
-        if st.button(
-            "🔴 SQUARE OFF ALL",
-            type="secondary",
-            use_container_width=True,
-            disabled=not confirm_all
-        ):
-            with st.spinner("Squaring off all positions..."):
-                results = client.square_off_all()
-                
-                success_count = sum(1 for r in results if r.get("success", False))
-                fail_count = len(results) - success_count
-                
-                if success_count > 0:
-                    st.success(f"✅ Squared off {success_count} position(s)")
-                if fail_count > 0:
-                    st.warning(f"⚠️ Failed to square off {fail_count} position(s)")
-                
-                time.sleep(1)
-                st.rerun()
+    if st.button("🔴 SQUARE OFF ALL", disabled=not confirm_all, use_container_width=True):
+        with st.spinner("Closing all positions..."):
+            results = client.square_off_all()
+            success = sum(1 for r in results if r.get("success"))
+            fail = len(results) - success
+            
+            if success:
+                st.success(f"✅ Closed {success} position(s)")
+            if fail:
+                st.warning(f"⚠️ Failed to close {fail} position(s)")
+            
+            time.sleep(1)
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1113,386 +880,264 @@ def render_square_off_tab():
 
 @handle_api_error
 def render_orders_tab():
-    """Render the orders management tab."""
     client = StateManager.get_client()
     if not client:
-        st.error("Not connected")
         return
     
-    st.subheader("📋 Order Management")
+    st.subheader("📋 Orders")
     
-    # Filters
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
-        exchange_filter = st.selectbox(
-            "Exchange",
-            options=["All", "NFO", "BFO"],
-            key="order_exchange"
-        )
-    
+        exchange = st.selectbox("Exchange", ["All", "NFO", "BFO"], key="ord_exch")
     with col2:
-        from_date = st.date_input(
-            "From Date",
-            value=datetime.now().date() - timedelta(days=7),
-            key="order_from"
-        )
-    
+        from_date = st.date_input("From", datetime.now().date() - timedelta(days=7), key="ord_from")
     with col3:
-        to_date = st.date_input(
-            "To Date",
-            value=datetime.now().date(),
-            key="order_to"
-        )
+        to_date = st.date_input("To", datetime.now().date(), key="ord_to")
     
-    with col4:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key="refresh_orders", use_container_width=True):
-            st.rerun()
+    if st.button("🔄 Refresh Orders", use_container_width=True):
+        st.rerun()
     
-    # Fetch orders
-    with st.spinner("Loading orders..."):
+    with st.spinner("Loading..."):
         orders = client.get_order_list(
-            exchange="" if exchange_filter == "All" else exchange_filter,
-            from_date=from_date.strftime("%Y-%m-%d"),
-            to_date=to_date.strftime("%Y-%m-%d")
+            "" if exchange == "All" else exchange,
+            from_date.strftime("%Y-%m-%d"),
+            to_date.strftime("%Y-%m-%d")
         )
     
     response = APIResponse(orders)
     
     if not response.success:
-        st.error(f"Failed to load orders: {response.message}")
+        st.error(f"Failed: {response.message}")
         return
     
     order_list = response.data_list
     
     if not order_list:
-        st.info("📭 No orders found for the selected period")
+        st.info("📭 No orders found")
         return
     
-    # Summary metrics
-    total_orders = len(order_list)
-    executed = sum(1 for o in order_list if o.get("order_status", "").lower() == "executed")
-    pending = sum(1 for o in order_list if o.get("order_status", "").lower() in ["pending", "open"])
-    rejected = sum(1 for o in order_list if o.get("order_status", "").lower() == "rejected")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Orders", total_orders)
-    col2.metric("Executed", executed)
-    col3.metric("Pending", pending)
-    col4.metric("Rejected", rejected)
-    
-    st.markdown("---")
-    
-    # Orders table
-    display_columns = ['order_id', 'stock_code', 'action', 'quantity', 'price', 
-                       'order_type', 'order_status', 'order_datetime']
-    
     df = pd.DataFrame(order_list)
-    available_cols = [c for c in display_columns if c in df.columns]
+    st.dataframe(df, use_container_width=True, height=400, hide_index=True)
     
-    if available_cols:
-        display_df = df[available_cols].copy()
-        column_names = {
-            'order_id': 'Order ID',
-            'stock_code': 'Instrument',
-            'action': 'Action',
-            'quantity': 'Qty',
-            'price': 'Price',
-            'order_type': 'Type',
-            'order_status': 'Status',
-            'order_datetime': 'Time'
-        }
-        display_df = display_df.rename(columns=column_names)
-        st.dataframe(display_df, use_container_width=True, height=400, hide_index=True)
-    else:
-        st.dataframe(df, use_container_width=True, height=400)
+    # Cancel pending orders
+    pending = [o for o in order_list if str(o.get("order_status", "")).lower() in ["pending", "open"]]
     
-    # Pending order actions
-    pending_orders = [o for o in order_list if o.get("order_status", "").lower() in ["pending", "open"]]
-    
-    if pending_orders:
+    if pending:
         st.markdown("---")
-        st.markdown("#### Manage Pending Orders")
+        st.markdown("#### Cancel Pending Orders")
         
-        order_labels = [
-            f"{o.get('order_id', 'N/A')} | {o.get('stock_code', '')} {o.get('action', '')} {o.get('quantity', '')}"
-            for o in pending_orders
-        ]
+        labels = [f"{o.get('order_id')} | {o.get('stock_code')} {o.get('action')} {o.get('quantity')}" for o in pending]
+        idx = st.selectbox("Select Order", range(len(labels)), format_func=lambda x: labels[x])
         
-        selected_order_idx = st.selectbox(
-            "Select Order",
-            options=range(len(order_labels)),
-            format_func=lambda x: order_labels[x],
-            key="manage_order"
-        )
-        
-        selected_order = pending_orders[selected_order_idx]
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("❌ Cancel Order", use_container_width=True, type="secondary"):
-                with st.spinner("Cancelling order..."):
-                    result = client.cancel_order(
-                        order_id=selected_order.get("order_id"),
-                        exchange=selected_order.get("exchange_code")
-                    )
-                    
-                    response = APIResponse(result)
-                    
-                    if response.success:
-                        st.success("✅ Order cancelled!")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(f"❌ Failed to cancel: {response.message}")
-        
-        with col2:
-            with st.expander("✏️ Modify Order"):
-                new_price = st.number_input(
-                    "New Price",
-                    min_value=0.0,
-                    value=float(selected_order.get("price", 0)),
-                    step=0.05,
-                    key="modify_price"
-                )
-                
-                new_qty = st.number_input(
-                    "New Quantity",
-                    min_value=1,
-                    value=int(selected_order.get("quantity", 1)),
-                    key="modify_qty"
-                )
-                
-                if st.button("💾 Save Changes", use_container_width=True):
-                    with st.spinner("Modifying order..."):
-                        result = client.modify_order(
-                            order_id=selected_order.get("order_id"),
-                            exchange=selected_order.get("exchange_code"),
-                            quantity=new_qty,
-                            price=new_price
-                        )
-                        
-                        response = APIResponse(result)
-                        
-                        if response.success:
-                            st.success("✅ Order modified!")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ Failed to modify: {response.message}")
+        if st.button("❌ Cancel Order", use_container_width=True):
+            with st.spinner("Cancelling..."):
+                result = client.cancel_order(pending[idx].get("order_id"), pending[idx].get("exchange_code"))
+                response = APIResponse(result)
+                if response.success:
+                    st.success("✅ Cancelled!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"❌ Failed: {response.message}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# POSITIONS TAB
+# POSITIONS TAB - FIXED P&L CALCULATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 @handle_api_error
 def render_positions_tab():
-    """Render the positions tab."""
     client = StateManager.get_client()
     if not client:
-        st.error("Not connected")
         return
     
-    st.subheader("📍 Current Positions")
+    st.subheader("📍 Positions")
     
-    col1, col2 = st.columns([4, 1])
-    with col2:
-        if st.button("🔄 Refresh", key="refresh_positions", use_container_width=True):
-            st.rerun()
+    debug_mode = st.session_state.get("debug_mode", False)
     
-    # Fetch positions
-    with st.spinner("Loading positions..."):
+    if st.button("🔄 Refresh", use_container_width=True, key="pos_refresh"):
+        st.rerun()
+    
+    with st.spinner("Loading..."):
         positions = client.get_portfolio_positions()
     
     response = APIResponse(positions)
     
     if not response.success:
-        st.error(f"Failed to load positions: {response.message}")
+        st.error(f"Failed: {response.message}")
         return
     
     position_list = response.data_list
     
     if not position_list:
-        st.info("📭 No open positions")
+        st.info("📭 No positions")
         return
     
-    # Calculate P&L for each position
+    # Process positions with correct type detection
     total_pnl = 0.0
-    total_investment = 0.0
+    enhanced = []
     
-    enhanced_positions = []
     for pos in position_list:
-        qty = int(pos.get("quantity", 0))
-        avg_price = float(pos.get("average_price", 0))
-        ltp = float(pos.get("ltp", avg_price))
-        
+        qty = _safe_int(pos.get("quantity", 0))
         if qty == 0:
             continue
         
-        # Calculate P&L
-        if qty > 0:  # Long position
-            pnl = (ltp - avg_price) * qty
-            investment = avg_price * qty
-        else:  # Short position
-            pnl = (avg_price - ltp) * abs(qty)
-            investment = avg_price * abs(qty)
+        # CRITICAL: Get correct position type
+        pos_type = get_position_type(pos)
         
+        avg = _safe_float(pos.get("average_price", 0))
+        ltp = _safe_float(pos.get("ltp", avg))
+        abs_qty = abs(qty)
+        
+        # Calculate P&L correctly
+        pnl = calculate_position_pnl(pos_type, avg, ltp, abs_qty)
         total_pnl += pnl
-        total_investment += investment
         
-        enhanced_positions.append({
-            **pos,
-            "calculated_pnl": pnl,
-            "pnl_percent": (pnl / investment * 100) if investment > 0 else 0,
-            "position_type": "Long" if qty > 0 else "Short"
+        enhanced.append({
+            "stock_code": pos.get("stock_code", ""),
+            "exchange_code": pos.get("exchange_code", ""),
+            "expiry_date": pos.get("expiry_date", ""),
+            "strike_price": pos.get("strike_price", ""),
+            "right": pos.get("right", ""),
+            "quantity": abs_qty,
+            "position_type": pos_type,
+            "avg_price": avg,
+            "ltp": ltp,
+            "pnl": pnl,
+            "_raw": pos  # Keep raw data for debug
         })
     
-    if not enhanced_positions:
+    if not enhanced:
         st.info("📭 No active positions")
         return
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
     
-    with col1:
-        st.metric("Total Positions", len(enhanced_positions))
+    col1.metric("Total", len(enhanced))
+    col2.metric("Long", sum(1 for p in enhanced if p["position_type"] == "long"))
+    col3.metric("Short", sum(1 for p in enhanced if p["position_type"] == "short"))
     
-    with col2:
-        long_count = sum(1 for p in enhanced_positions if p["position_type"] == "Long")
-        st.metric("Long", long_count)
-    
-    with col3:
-        short_count = sum(1 for p in enhanced_positions if p["position_type"] == "Short")
-        st.metric("Short", short_count)
-    
-    with col4:
-        pnl_color = "normal" if total_pnl >= 0 else "inverse"
-        st.metric(
-            "Total P&L",
-            f"₹{total_pnl:+,.2f}",
-            delta=f"{(total_pnl/total_investment*100):+.2f}%" if total_investment > 0 else "0%",
-            delta_color=pnl_color
-        )
+    pnl_color = "normal" if total_pnl >= 0 else "inverse"
+    col4.metric("Total P&L", f"₹{total_pnl:+,.2f}", delta_color=pnl_color)
     
     st.markdown("---")
     
     # Positions table
     display_data = []
-    for p in enhanced_positions:
+    for p in enhanced:
         display_data.append({
-            "Instrument": p.get("stock_code", ""),
-            "Exchange": p.get("exchange_code", ""),
-            "Expiry": p.get("expiry_date", ""),
-            "Strike": p.get("strike_price", ""),
-            "Type": p.get("right", ""),
-            "Position": p["position_type"],
-            "Qty": p.get("quantity", 0),
-            "Avg Price": f"₹{float(p.get('average_price', 0)):.2f}",
-            "LTP": f"₹{float(p.get('ltp', 0)):.2f}",
-            "P&L": f"₹{p['calculated_pnl']:+,.2f}",
-            "P&L %": f"{p['pnl_percent']:+.2f}%"
+            "Instrument": p["stock_code"],
+            "Strike": p["strike_price"],
+            "Type": p["right"],
+            "Expiry": p["expiry_date"],
+            "Qty": p["quantity"],
+            "Position": p["position_type"].upper(),
+            "Avg": f"₹{p['avg_price']:.2f}",
+            "LTP": f"₹{p['ltp']:.2f}",
+            "P&L": f"₹{p['pnl']:+,.2f}"
         })
     
     df = pd.DataFrame(display_data)
     
-    # Apply styling
-    def highlight_pnl(val):
-        if isinstance(val, str) and '₹' in val:
-            if val.startswith('₹-') or val.startswith('-₹'):
-                return 'color: #dc3545; font-weight: bold'
-            elif '+' in val or (val.replace('₹', '').replace(',', '').replace('.', '').isdigit() and float(val.replace('₹', '').replace(',', '')) > 0):
-                return 'color: #28a745; font-weight: bold'
-        return ''
+    # Style
+    def style_pos(val):
+        if val == "LONG":
+            return "background-color: #d4edda; color: #155724; font-weight: bold"
+        elif val == "SHORT":
+            return "background-color: #f8d7da; color: #721c24; font-weight: bold"
+        return ""
     
-    st.dataframe(df, use_container_width=True, height=400, hide_index=True)
+    def style_pnl(val):
+        if isinstance(val, str):
+            if "+" in val or (val.replace("₹", "").replace(",", "").replace(".", "").lstrip("-").isdigit() and not val.startswith("₹-")):
+                num = float(val.replace("₹", "").replace(",", "").replace("+", ""))
+                if num > 0:
+                    return "color: #28a745; font-weight: bold"
+            if "-" in val:
+                return "color: #dc3545; font-weight: bold"
+        return ""
     
+    styled = df.style.applymap(style_pos, subset=["Position"])
+    styled = styled.applymap(style_pnl, subset=["P&L"])
+    
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    
+    # Debug
+    if debug_mode:
+        st.markdown("---")
+        st.markdown("### 🔧 Debug: Raw Position Data")
+        for i, p in enumerate(enhanced):
+            with st.expander(f"Position {i+1}: {p['stock_code']} {p['strike_price']}"):
+                st.write(f"**Detected Type:** {p['position_type']}")
+                st.write(f"**P&L Calculation:**")
+                st.write(f"- Position: {p['position_type']}")
+                st.write(f"- Avg Price: {p['avg_price']}")
+                st.write(f"- LTP: {p['ltp']}")
+                st.write(f"- Qty: {p['quantity']}")
+                if p['position_type'] == 'short':
+                    st.write(f"- Formula: (Avg - LTP) × Qty = ({p['avg_price']} - {p['ltp']}) × {p['quantity']} = {p['pnl']:.2f}")
+                else:
+                    st.write(f"- Formula: (LTP - Avg) × Qty = ({p['ltp']} - {p['avg_price']}) × {p['quantity']} = {p['pnl']:.2f}")
+                st.json(p["_raw"])
+    
+    # Position details
     st.markdown("---")
+    st.markdown("#### Position Details")
     
-    # Position details expanders
-    st.markdown("#### 📊 Position Details")
-    
-    for pos in enhanced_positions:
-        pnl = pos['calculated_pnl']
-        pnl_emoji = "📈" if pnl >= 0 else "📉"
+    for p in enhanced:
+        emoji = "📈" if p["pnl"] >= 0 else "📉"
+        pos_badge = "🟢 LONG" if p["position_type"] == "long" else "🔴 SHORT"
         
-        with st.expander(
-            f"{pnl_emoji} {pos.get('stock_code')} {pos.get('strike_price')} {pos.get('right')} | "
-            f"Qty: {pos.get('quantity')} | P&L: ₹{pnl:+,.2f}"
-        ):
+        with st.expander(f"{emoji} {p['stock_code']} {p['strike_price']} {p['right']} | {pos_badge} | P&L: ₹{p['pnl']:+,.2f}"):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.markdown("**Contract Details**")
-                st.write(f"Exchange: {pos.get('exchange_code')}")
-                st.write(f"Expiry: {pos.get('expiry_date')}")
-                st.write(f"Strike: {pos.get('strike_price')}")
-                st.write(f"Type: {pos.get('right')}")
+                st.write(f"**Exchange:** {p['exchange_code']}")
+                st.write(f"**Expiry:** {p['expiry_date']}")
+                st.write(f"**Strike:** {p['strike_price']}")
             
             with col2:
-                st.markdown("**Position Details**")
-                st.write(f"Quantity: {pos.get('quantity')}")
-                st.write(f"Position: {pos['position_type']}")
-                st.write(f"Avg Price: ₹{float(pos.get('average_price', 0)):.2f}")
-                st.write(f"LTP: ₹{float(pos.get('ltp', 0)):.2f}")
+                st.write(f"**Option:** {p['right']}")
+                st.write(f"**Position:** {p['position_type'].upper()}")
+                st.write(f"**Quantity:** {p['quantity']}")
             
             with col3:
-                st.markdown("**P&L Analysis**")
-                st.write(f"P&L: ₹{pnl:+,.2f}")
-                st.write(f"P&L %: {pos['pnl_percent']:+.2f}%")
-                
-                # Break-even analysis for short positions
-                if pos['position_type'] == 'Short':
-                    avg = float(pos.get('average_price', 0))
-                    st.write(f"Break-even: ₹{avg:.2f}")
+                st.write(f"**Avg Price:** ₹{p['avg_price']:.2f}")
+                st.write(f"**LTP:** ₹{p['ltp']:.2f}")
+                pnl_text = f"₹{p['pnl']:+,.2f}"
+                if p['pnl'] >= 0:
+                    st.markdown(f"**P&L:** <span style='color:green'>{pnl_text}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**P&L:** <span style='color:red'>{pnl_text}</span>", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION
+# MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def render_main_dashboard():
-    """Render the main dashboard with all tabs."""
-    tab_names = [
-        "📊 Dashboard",
-        "💰 Sell Options",
-        "🔄 Square Off",
-        "📋 Orders",
-        "📍 Positions"
-    ]
-    
-    tabs = st.tabs(tab_names)
+    tabs = st.tabs(["📊 Dashboard", "💰 Sell Options", "🔄 Square Off", "📋 Orders", "📍 Positions"])
     
     with tabs[0]:
         render_dashboard_tab()
-    
     with tabs[1]:
         render_sell_options_tab()
-    
     with tabs[2]:
         render_square_off_tab()
-    
     with tabs[3]:
         render_orders_tab()
-    
     with tabs[4]:
         render_positions_tab()
 
 
 def main():
-    """Main application entry point."""
-    
-    # Initialize state
     StateManager.init()
-    
-    # Render header
     render_header()
     
-    # Sidebar
     with st.sidebar:
         if not StateManager.is_authenticated():
             render_login_form()
@@ -1502,21 +1147,14 @@ def main():
         st.markdown("---")
         render_settings()
         
-        # Footer
         st.markdown("---")
-        st.caption("Breeze Options Trader v2.0")
-        st.caption("© 2024 - For educational purposes")
+        st.caption("Breeze Options Trader v2.1")
     
-    # Main content
     if not StateManager.is_authenticated():
         render_welcome_page()
     else:
         render_main_dashboard()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     main()
