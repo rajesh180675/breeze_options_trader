@@ -16,7 +16,7 @@ class Config:
         "NIFTY": {
             "stock_code": "NIFTY",
             "exchange": "NFO",
-            "lot_size": 25,
+            "lot_size": 65,
             "strike_gap": 50,
             "expiry_day": "Tuesday",
             "description": "NIFTY 50 Index",
@@ -48,7 +48,7 @@ class Config:
         "SENSEX": {
             "stock_code": "BSESEN",
             "exchange": "BFO",
-            "lot_size": 10,
+            "lot_size": 20,
             "strike_gap": 100,
             "expiry_day": "Thursday",
             "description": "BSE SENSEX Index",
