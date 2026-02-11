@@ -3,7 +3,11 @@
 Breeze Options Trader - Main Application
 ICICI Direct Breeze SDK Options Trading Platform
 """
-
+import sys, types
+if 'config' not in sys.modules:
+    config = types.ModuleType('config')
+    config.SECURITY_MASTER_URL = 'https://api.icicidirect.com/breezeapi/api/v1/securitymaster'
+    sys.modules['config'] = config
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
