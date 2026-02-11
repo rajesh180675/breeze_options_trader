@@ -324,18 +324,19 @@ class BreezeClientWrapper:
         err = self._guard()
         if err:
             return [err]
-
+    
         pos_resp = self.get_portfolio_positions()
         if not pos_resp.get("success"):
             return [pos_resp]
-
+    
         data = pos_resp.get("data", {})
-        positions = (
-            data.get("Success", []) if isinstance(data, dict) else []
-        )
+        positions = data.get("Success", []) if isinstance(data, dict) else []
         if isinstance(positions, dict):
             positions = [positions]
-
+    
+        # Import from utils (NOT from app — avoids circular import)
+        from utils import PositionUtils
+    
         results = []
         for p in positions:
             try:
@@ -344,21 +345,19 @@ class BreezeClientWrapper:
                 qty = abs(int(p.get("quantity", 0)))
                 if qty == 0:
                     continue
-                cur = "long" if int(p.get("quantity", 0)) > 0 else "short"
-                # Use detect logic for better accuracy
-                from app import detect_position_type
-                cur = detect_position_type(p)
-
+    
+                pos_type = PositionUtils.detect_type(p)
+    
                 r = self.square_off_position(
                     p.get("stock_code", ""),
                     p.get("exchange_code", ""),
                     p.get("expiry_date", ""),
                     int(p.get("strike_price", 0)),
                     str(p.get("right", "")).upper(),
-                    qty, cur,
+                    qty, pos_type,
                 )
                 results.append(r)
             except Exception as e:
                 results.append(self._fail(str(e)))
-
+    
         return results or [self._ok({"message": "No positions"})]
