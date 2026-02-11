@@ -1,37 +1,84 @@
 """
 Configuration for Breeze Options Trader.
-Renamed from config.py to avoid shadowing breeze_connect's internal config.
+──────────────────────────────────────────
+CRITICAL FIXES:
+  • SENSEX uses stock_code "BSESEN" in ICICI Breeze API
+  • NIFTY weekly expiry is TUESDAY
+  • SENSEX/BSESEN weekly expiry is THURSDAY
+  • BANKEX weekly expiry is MONDAY
 """
+
 import streamlit as st
 from datetime import datetime, timedelta
-import calendar
 import pytz
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# INSTRUMENTS — VERIFY expiry days with your exchange calendar!
-#
-#  After SEBI Oct-2024 circular (effective Nov-20-2024):
-#    • Only ONE weekly index per exchange
-#    • NSE → NIFTY   |  BSE → SENSEX
-#    • All others (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) → monthly only
-#
-#  ICICI Breeze stock codes differ from exchange tickers:
-#    • SENSEX → "BSESEN"   (not "SENSEX")
-# ═══════════════════════════════════════════════════════════════════════════════
-
-DAY_MAP = {
-    "Monday": 0, "Tuesday": 1, "Wednesday": 2,
-    "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
-}
-
-IST = pytz.timezone("Asia/Kolkata")
 
 
 class Config:
+    """Application configuration — single source of truth."""
 
-    IST = IST
+    IST = pytz.timezone("Asia/Kolkata")
 
-    # ── Secrets helpers ───────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # INSTRUMENTS
+    # Key       = display name used in UI
+    # stock_code= ICICI Breeze API code (BSESEN, not SENSEX!)
+    # exchange  = NFO for NSE derivatives, BFO for BSE derivatives
+    # lot_size  = contract lot size
+    # strike_gap= gap between consecutive strikes
+    # expiry_day= weekday name for weekly expiry
+    # ══════════════════════════════════════════════════════════════════════
+
+    INSTRUMENTS = {
+        "NIFTY": {
+            "stock_code": "NIFTY",
+            "exchange": "NFO",
+            "lot_size": 25,
+            "strike_gap": 50,
+            "expiry_day": "Tuesday",
+            "description": "NIFTY 50 Index",
+        },
+        "BANKNIFTY": {
+            "stock_code": "BANKNIFTY",
+            "exchange": "NFO",
+            "lot_size": 15,
+            "strike_gap": 100,
+            "expiry_day": "Wednesday",
+            "description": "Bank NIFTY Index",
+        },
+        "FINNIFTY": {
+            "stock_code": "FINNIFTY",
+            "exchange": "NFO",
+            "lot_size": 25,
+            "strike_gap": 50,
+            "expiry_day": "Tuesday",
+            "description": "NIFTY Financial Services",
+        },
+        "MIDCPNIFTY": {
+            "stock_code": "MIDCPNIFTY",
+            "exchange": "NFO",
+            "lot_size": 50,
+            "strike_gap": 25,
+            "expiry_day": "Monday",
+            "description": "NIFTY Midcap Select",
+        },
+        "SENSEX": {
+            "stock_code": "BSESEN",       # ← ICICI uses BSESEN
+            "exchange": "BFO",
+            "lot_size": 10,
+            "strike_gap": 100,
+            "expiry_day": "Thursday",      # ← Thursday, not Friday
+            "description": "BSE SENSEX Index",
+        },
+        "BANKEX": {
+            "stock_code": "BANKEX",
+            "exchange": "BFO",
+            "lot_size": 15,
+            "strike_gap": 100,
+            "expiry_day": "Monday",
+            "description": "BSE BANKEX Index",
+        },
+    }
+
     @staticmethod
     def get_api_key():
         try:
@@ -53,167 +100,61 @@ class Config:
         except Exception:
             return ""
 
-    # ── Instrument definitions ────────────────────────────────────────────
-    INSTRUMENTS = {
-        "NIFTY": {
-            "exchange": "NFO",
-            "stock_code": "NIFTY",
-            "lot_size": 25,
-            "strike_gap": 50,
-            "expiry_type": "weekly",
-            "expiry_day": "Tuesday",      # ← VERIFY with NSE
-        },
-        "BANKNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "BANKNIFTY",
-            "lot_size": 15,
-            "strike_gap": 100,
-            "expiry_type": "monthly",     # Monthly only post-SEBI rule
-            "expiry_day": "Thursday",     # Last Thursday of month
-        },
-        "SENSEX": {
-            "exchange": "BFO",
-            "stock_code": "BSESEN",       # ← ICICI code, NOT "SENSEX"
-            "lot_size": 10,
-            "strike_gap": 100,
-            "expiry_type": "weekly",
-            "expiry_day": "Thursday",     # ← VERIFY with BSE
-        },
-        "BANKEX": {
-            "exchange": "BFO",
-            "stock_code": "BANKEX",
-            "lot_size": 15,
-            "strike_gap": 100,
-            "expiry_type": "monthly",
-            "expiry_day": "Thursday",
-        },
-        "FINNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "FINNIFTY",
-            "lot_size": 25,
-            "strike_gap": 50,
-            "expiry_type": "monthly",
-            "expiry_day": "Thursday",
-        },
-        "MIDCPNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "MIDCPNIFTY",
-            "lot_size": 50,
-            "strike_gap": 25,
-            "expiry_type": "monthly",
-            "expiry_day": "Thursday",
-        },
-    }
-
-    ORDER_TYPES = ["Market", "Limit"]
-    OPTION_TYPES = ["CE", "PE"]
-    MARKET_OPEN = "09:15"
-    MARKET_CLOSE = "15:30"
-
-    # ── Expiry calculation ────────────────────────────────────────────────
-
     @staticmethod
     def get_next_expiries(instrument: str, count: int = 5) -> list:
         """
-        Get next `count` expiry dates for an instrument.
-        Returns dates as YYYY-MM-DD strings.
-
-        Weekly  → every <expiry_day>
-        Monthly → last <expiry_day> of each coming month
+        Return the next `count` weekly expiry dates for an instrument.
+        Each date is a string in YYYY-MM-DD format.
         """
-        cfg = Config.INSTRUMENTS.get(instrument)
-        if not cfg:
+        inst = Config.INSTRUMENTS.get(instrument)
+        if not inst:
             return []
 
-        expiry_type = cfg.get("expiry_type", "weekly")
-        expiry_day_name = cfg.get("expiry_day", "Thursday")
+        day_name = inst["expiry_day"]
+        day_map = {
+            "Monday": 0, "Tuesday": 1, "Wednesday": 2,
+            "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
+        }
+        target = day_map.get(day_name, 3)
 
-        if expiry_type == "monthly":
-            return Config._monthly_expiries(expiry_day_name, count)
+        now = datetime.now(Config.IST)
+        days_ahead = (target - now.weekday()) % 7
+        # If today IS expiry day, include it (market might still be open)
+        if days_ahead == 0:
+            next_exp = now
         else:
-            return Config._weekly_expiries(expiry_day_name, count)
+            next_exp = now + timedelta(days=days_ahead)
 
-    @staticmethod
-    def _weekly_expiries(day_name: str, count: int) -> list:
-        now = datetime.now(IST)
-        target = DAY_MAP[day_name]
-
-        days_ahead = target - now.weekday()
-        # Include today if it IS expiry day and before market close
-        if days_ahead < 0:
-            days_ahead += 7
-        elif days_ahead == 0:
-            mkt_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-            if now > mkt_close:
-                days_ahead += 7
-
-        first = now + timedelta(days=days_ahead)
-        return [(first + timedelta(weeks=i)).strftime("%Y-%m-%d")
-                for i in range(count)]
-
-    @staticmethod
-    def _monthly_expiries(day_name: str, count: int) -> list:
-        now = datetime.now(IST)
-        target = DAY_MAP[day_name]
         expiries = []
-        year, month = now.year, now.month
-
-        while len(expiries) < count:
-            # Find last occurrence of target day in this month
-            last_day_of_month = calendar.monthrange(year, month)[1]
-            dt = datetime(year, month, last_day_of_month, tzinfo=IST)
-            while dt.weekday() != target:
-                dt -= timedelta(days=1)
-
-            # Only include if not already passed
-            if dt.date() >= now.date():
-                expiries.append(dt.strftime("%Y-%m-%d"))
-
-            # Next month
-            if month == 12:
-                year += 1
-                month = 1
-            else:
-                month += 1
-
+        for i in range(count):
+            d = next_exp + timedelta(weeks=i)
+            expiries.append(d.strftime("%Y-%m-%d"))
         return expiries
 
     @staticmethod
-    def get_exchange_for_instrument(instrument: str) -> str:
-        return Config.INSTRUMENTS.get(instrument, {}).get("exchange", "NFO")
+    def get_instrument_display(stock_code: str) -> str:
+        """Map API stock_code back to display name."""
+        for name, cfg in Config.INSTRUMENTS.items():
+            if cfg["stock_code"] == stock_code:
+                return name
+        return stock_code
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def init_session_state():
+    """Initialise Streamlit session state with safe defaults."""
     defaults = {
         "authenticated": False,
         "breeze_client": None,
-        "positions": [],
-        "orders": [],
+        "current_page": "Dashboard",
         "selected_instrument": "NIFTY",
-        "selected_expiry": None,
-        "selected_strike": None,
-        "selected_option_type": "CE",
-        "selected_lots": 1,
         "api_key": "",
         "api_secret": "",
         "session_token": "",
-        "last_refresh": None,
-        "option_chain_data": None,
         "option_chain_cache": {},
         "cache_timestamp": {},
+        "debug_mode": False,
         "error_message": None,
         "success_message": None,
-        "warning_message": None,
-        "order_history": [],
-        "trade_log": [],
-        "current_quote": None,
-        "sell_option_type": "CE",
-        "current_page": "Dashboard",
-        "debug_mode": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -221,6 +162,8 @@ def init_session_state():
 
 
 class SessionState:
+    """Backward-compat wrapper."""
+
     @staticmethod
     def init_session_state():
         init_session_state()
