@@ -1,6 +1,7 @@
 """
 Breeze API Client Wrapper
 Handles all interactions with ICICI Direct Breeze SDK
+Fixed for breeze_connect library config issues
 """
 
 import logging
@@ -8,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Any
 import pandas as pd
 import pytz
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,18 +17,103 @@ logger = logging.getLogger(__name__)
 
 # Lazy import placeholder - will be loaded when needed
 _BreezeConnect = None
+_breeze_patched = False
+
+def _patch_breeze_connect():
+    """
+    Patch breeze_connect library to fix missing/broken config
+    This is a workaround for bugs in the breeze_connect package
+    """
+    global _breeze_patched
+    
+    if _breeze_patched:
+        return
+    
+    try:
+        logger.info("Attempting to patch breeze_connect configuration...")
+        
+        # Method 1: Try to patch the config module before import
+        try:
+            # Import breeze_connect's internal config if it exists
+            import breeze_connect.breeze_config as breeze_config
+            
+            # Patch missing attributes
+            if not hasattr(breeze_config, 'SECURITY_MASTER_URL'):
+                breeze_config.SECURITY_MASTER_URL = 'https://api.icicidirect.com/breezeapi/api/v1/securitymaster'
+                logger.info("Added SECURITY_MASTER_URL to breeze_config")
+            
+            if not hasattr(breeze_config, 'API_URL'):
+                breeze_config.API_URL = 'https://api.icicidirect.com/breezeapi/api/v1'
+                logger.info("Added API_URL to breeze_config")
+                
+        except ImportError:
+            logger.warning("Could not import breeze_connect.breeze_config")
+        
+        # Method 2: Create a standalone config module
+        try:
+            import types
+            if 'config' not in sys.modules:
+                config_module = types.ModuleType('config')
+                config_module.SECURITY_MASTER_URL = 'https://api.icicidirect.com/breezeapi/api/v1/securitymaster'
+                config_module.API_URL = 'https://api.icicidirect.com/breezeapi/api/v1'
+                sys.modules['config'] = config_module
+                logger.info("Created patched config module")
+        except Exception as e:
+            logger.warning(f"Could not create config module: {str(e)}")
+        
+        # Method 3: Monkey-patch urllib if the issue is with network access
+        try:
+            from unittest.mock import Mock, patch
+            # This might help if the issue is network access during import
+        except:
+            pass
+            
+        _breeze_patched = True
+        logger.info("Breeze config patching completed")
+        
+    except Exception as e:
+        logger.error(f"Error during patching: {str(e)}")
+        # Continue anyway - the import might still work
 
 def _get_breeze_connect():
-    """Lazy import of BreezeConnect to avoid import-time failures"""
+    """
+    Lazy import of BreezeConnect with extensive error handling
+    """
     global _BreezeConnect
+    
     if _BreezeConnect is None:
         try:
+            # First, try to patch known issues
+            _patch_breeze_connect()
+            
+            # Now try to import
+            logger.info("Importing BreezeConnect...")
             from breeze_connect import BreezeConnect
+            
             _BreezeConnect = BreezeConnect
-            logger.info("BreezeConnect imported successfully")
+            logger.info("✅ BreezeConnect imported successfully")
+            
+        except ImportError as e:
+            error_msg = str(e)
+            logger.error(f"❌ ImportError: {error_msg}")
+            
+            # Provide helpful error messages
+            if "config" in error_msg.lower():
+                raise ImportError(
+                    f"The breeze_connect library has configuration issues. "
+                    f"Original error: {error_msg}. "
+                    f"This may be due to package bugs or network restrictions. "
+                    f"Try: 1) Reinstalling breeze-connect, 2) Checking network access, "
+                    f"3) Using a different environment."
+                )
+            else:
+                raise ImportError(f"Could not import breeze_connect: {error_msg}")
+                
         except Exception as e:
-            logger.error(f"Failed to import BreezeConnect: {str(e)}")
-            raise ImportError(f"Could not import breeze_connect library. Error: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"❌ Unexpected error: {error_msg}")
+            raise ImportError(f"Failed to load breeze_connect: {error_msg}")
+    
     return _BreezeConnect
 
 
@@ -48,23 +135,48 @@ class BreezeClientWrapper:
         """Connect to Breeze API with session token"""
         try:
             # Lazy load BreezeConnect only when connecting
+            logger.info("Attempting to connect to Breeze API...")
             BreezeConnect = _get_breeze_connect()
             
+            logger.info("Creating BreezeConnect instance...")
             self.breeze = BreezeConnect(api_key=self.api_key)
+            
+            logger.info("Generating session...")
             self.breeze.generate_session(
                 api_secret=self.api_secret,
                 session_token=session_token
             )
+            
             self.is_connected = True
-            logger.info("Successfully connected to Breeze API")
+            logger.info("✅ Successfully connected to Breeze API")
             return {"success": True, "message": "Connected successfully"}
+            
         except ImportError as e:
-            logger.error(f"Import failed: {str(e)}")
-            return {"success": False, "message": f"Failed to load Breeze library: {str(e)}"}
+            error_msg = str(e)
+            logger.error(f"Import failed: {error_msg}")
+            return {
+                "success": False, 
+                "message": f"Failed to load Breeze library. {error_msg}"
+            }
+            
         except Exception as e:
-            logger.error(f"Connection failed: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Connection failed: {error_msg}")
             self.is_connected = False
-            return {"success": False, "message": str(e)}
+            
+            # Provide user-friendly error messages
+            if "session" in error_msg.lower():
+                return {
+                    "success": False,
+                    "message": f"Session error: {error_msg}. Please check your session token."
+                }
+            elif "api" in error_msg.lower():
+                return {
+                    "success": False,
+                    "message": f"API error: {error_msg}. Please check your API credentials."
+                }
+            else:
+                return {"success": False, "message": error_msg}
     
     def get_customer_details(self) -> Dict[str, Any]:
         """Get customer profile details"""
