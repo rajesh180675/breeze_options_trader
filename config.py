@@ -6,6 +6,12 @@ import streamlit as st
 from datetime import datetime, timedelta
 import pytz
 
+# ── breeze_connect compatibility ──────────────────────────────────────────────
+# breeze_connect internally does: from config import SECURITY_MASTER_URL
+# Our config.py is found first on the path, so we MUST expose it here.
+SECURITY_MASTER_URL = "https://api.icicidirect.com/breezeapi/api/v1/securitymaster"
+# ──────────────────────────────────────────────────────────────────────────────
+
 
 class Config:
     """Application configuration"""
@@ -15,104 +21,72 @@ class Config:
     
     @staticmethod
     def get_api_key():
-        """Get API key from secrets"""
         try:
             return st.secrets.get("BREEZE_API_KEY", "")
-        except:
+        except Exception:
             return ""
     
     @staticmethod
     def get_api_secret():
-        """Get API secret from secrets"""
         try:
             return st.secrets.get("BREEZE_API_SECRET", "")
-        except:
+        except Exception:
             return ""
     
     @staticmethod
     def get_session_token():
-        """Get session token from secrets"""
         try:
             return st.secrets.get("BREEZE_SESSION_TOKEN", "")
-        except:
+        except Exception:
             return ""
     
-    # Supported Instruments
     INSTRUMENTS = {
         "NIFTY": {
-            "exchange": "NFO",
-            "stock_code": "NIFTY",
-            "lot_size": 25,
-            "strike_gap": 50,
+            "exchange": "NFO", "stock_code": "NIFTY",
+            "lot_size": 25, "strike_gap": 50,
             "description": "NIFTY 50 Index"
         },
         "BANKNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "BANKNIFTY",
-            "lot_size": 15,
-            "strike_gap": 100,
+            "exchange": "NFO", "stock_code": "BANKNIFTY",
+            "lot_size": 15, "strike_gap": 100,
             "description": "Bank NIFTY Index"
         },
         "SENSEX": {
-            "exchange": "BFO",
-            "stock_code": "SENSEX",
-            "lot_size": 10,
-            "strike_gap": 100,
+            "exchange": "BFO", "stock_code": "SENSEX",
+            "lot_size": 10, "strike_gap": 100,
             "description": "BSE SENSEX Index"
         },
         "BANKEX": {
-            "exchange": "BFO",
-            "stock_code": "BANKEX",
-            "lot_size": 15,
-            "strike_gap": 100,
+            "exchange": "BFO", "stock_code": "BANKEX",
+            "lot_size": 15, "strike_gap": 100,
             "description": "BSE BANKEX Index"
         },
         "FINNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "FINNIFTY",
-            "lot_size": 25,
-            "strike_gap": 50,
+            "exchange": "NFO", "stock_code": "FINNIFTY",
+            "lot_size": 25, "strike_gap": 50,
             "description": "NIFTY Financial Services"
         },
         "MIDCPNIFTY": {
-            "exchange": "NFO",
-            "stock_code": "MIDCPNIFTY",
-            "lot_size": 50,
-            "strike_gap": 25,
+            "exchange": "NFO", "stock_code": "MIDCPNIFTY",
+            "lot_size": 50, "strike_gap": 25,
             "description": "NIFTY Midcap Select"
         }
     }
     
-    # Order Types
     ORDER_TYPES = ["Market", "Limit"]
-    
-    # Product Types
-    PRODUCT_TYPES = {
-        "Intraday": "intraday",
-        "Margin": "margin",
-        "Cash": "cash"
-    }
-    
-    # Option Types
+    PRODUCT_TYPES = {"Intraday": "intraday", "Margin": "margin", "Cash": "cash"}
     OPTION_TYPES = ["CE", "PE"]
-    
-    # Trading Hours
     MARKET_OPEN = "09:15"
     MARKET_CLOSE = "15:30"
     
-    # Expiry Days
     EXPIRY_DAYS = {
-        "NIFTY": "Thursday",
-        "BANKNIFTY": "Wednesday",
-        "FINNIFTY": "Tuesday",
-        "MIDCPNIFTY": "Monday",
-        "SENSEX": "Friday",
-        "BANKEX": "Monday"
+        "NIFTY": "Thursday", "BANKNIFTY": "Wednesday",
+        "FINNIFTY": "Tuesday", "MIDCPNIFTY": "Monday",
+        "SENSEX": "Friday", "BANKEX": "Monday"
     }
 
     @staticmethod
     def get_next_expiries(instrument: str, count: int = 5) -> list:
-        """Get next expiry dates for an instrument"""
         expiries = []
         current_date = datetime.now(Config.IST)
         
@@ -167,6 +141,7 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
 
 class SessionState:
     """Backward-compatible wrapper so app.py can call SessionState.init_session_state()."""
