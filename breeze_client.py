@@ -7,12 +7,27 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Any
 import pandas as pd
-from breeze_connect import BreezeConnect
 import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Lazy import placeholder - will be loaded when needed
+_BreezeConnect = None
+
+def _get_breeze_connect():
+    """Lazy import of BreezeConnect to avoid import-time failures"""
+    global _BreezeConnect
+    if _BreezeConnect is None:
+        try:
+            from breeze_connect import BreezeConnect
+            _BreezeConnect = BreezeConnect
+            logger.info("BreezeConnect imported successfully")
+        except Exception as e:
+            logger.error(f"Failed to import BreezeConnect: {str(e)}")
+            raise ImportError(f"Could not import breeze_connect library. Error: {str(e)}")
+    return _BreezeConnect
 
 
 class BreezeClientWrapper:
@@ -32,6 +47,9 @@ class BreezeClientWrapper:
     def connect(self, session_token: str) -> Dict[str, Any]:
         """Connect to Breeze API with session token"""
         try:
+            # Lazy load BreezeConnect only when connecting
+            BreezeConnect = _get_breeze_connect()
+            
             self.breeze = BreezeConnect(api_key=self.api_key)
             self.breeze.generate_session(
                 api_secret=self.api_secret,
@@ -40,6 +58,9 @@ class BreezeClientWrapper:
             self.is_connected = True
             logger.info("Successfully connected to Breeze API")
             return {"success": True, "message": "Connected successfully"}
+        except ImportError as e:
+            logger.error(f"Import failed: {str(e)}")
+            return {"success": False, "message": f"Failed to load Breeze library: {str(e)}"}
         except Exception as e:
             logger.error(f"Connection failed: {str(e)}")
             self.is_connected = False
