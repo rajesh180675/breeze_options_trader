@@ -1,12 +1,14 @@
 """
-Utility functions & option chain analyser.
+Utilities, option chain analyser, and position detection.
 """
 
 import pandas as pd
-import numpy as np
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List
 import pytz
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     from scipy.stats import norm as _norm
@@ -16,14 +18,68 @@ except ImportError:
     _HAS_SCIPY = False
 
 
+def _safe_int(v):
+    try: return int(float(str(v).strip())) if v else 0
+    except: return 0
+
+
+class PositionUtils:
+    """Position type detection, P&L, and close action logic."""
+
+    @staticmethod
+    def detect_type(pos: Dict[str, Any]) -> str:
+        """
+        Determine LONG or SHORT from Breeze position data.
+        Breeze returns positive qty for BOTH — must check action field.
+        """
+        a = str(pos.get("action", "")).lower().strip()
+        if a == "sell": return "short"
+        if a == "buy": return "long"
+
+        for fld in ("position_type", "segment"):
+            v = str(pos.get(fld, "")).lower()
+            if "short" in v or "sell" in v: return "short"
+            if "long" in v or "buy" in v: return "long"
+
+        sq = _safe_int(pos.get("sell_quantity", 0))
+        bq = _safe_int(pos.get("buy_quantity", 0))
+        if sq > 0 and bq == 0: return "short"
+        if bq > 0 and sq == 0: return "long"
+        if sq > bq: return "short"
+        if bq > sq: return "long"
+
+        osq = _safe_int(pos.get("open_sell_qty", 0))
+        obq = _safe_int(pos.get("open_buy_qty", 0))
+        if osq > obq: return "short"
+        if obq > osq: return "long"
+
+        if _safe_int(pos.get("quantity", 0)) < 0: return "short"
+
+        logger.warning(f"Position type unknown: {pos}")
+        return "long"
+
+    @staticmethod
+    def close_action(pos_type: str) -> str:
+        """BUY to close short, SELL to close long."""
+        return "buy" if pos_type == "short" else "sell"
+
+    @staticmethod
+    def calc_pnl(pos_type: str, avg: float, ltp: float, qty: int) -> float:
+        """
+        Long  = (LTP − Avg) × Qty
+        Short = (Avg − LTP) × Qty
+        """
+        q = abs(qty)
+        return (avg - ltp) * q if pos_type == "short" else (ltp - avg) * q
+
+
 class Utils:
     IST = pytz.timezone("Asia/Kolkata")
 
     @staticmethod
     def is_market_open() -> bool:
         now = datetime.now(Utils.IST)
-        if now.weekday() >= 5:
-            return False
+        if now.weekday() >= 5: return False
         o = now.replace(hour=9, minute=15, second=0, microsecond=0)
         c = now.replace(hour=15, minute=30, second=0, microsecond=0)
         return o <= now <= c
@@ -31,105 +87,60 @@ class Utils:
     @staticmethod
     def get_market_status() -> str:
         now = datetime.now(Utils.IST)
-        if now.weekday() >= 5:
-            return "🔴 Market Closed (Weekend)"
+        if now.weekday() >= 5: return "🔴 Closed (Weekend)"
         o = now.replace(hour=9, minute=15, second=0, microsecond=0)
         c = now.replace(hour=15, minute=30, second=0, microsecond=0)
         p = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now < p:
-            return "🟡 Pre-Market"
-        if p <= now < o:
-            return "🟠 Pre-Open Session"
-        if o <= now <= c:
-            return "🟢 Market Open"
-        return "🔴 Market Closed"
+        if now < p: return "🟡 Pre-Market"
+        if p <= now < o: return "🟠 Pre-Open"
+        if o <= now <= c: return "🟢 Market Open"
+        return "🔴 Closed"
 
     @staticmethod
     def format_currency(value: float) -> str:
-        if abs(value) >= 1e7:
-            return f"₹{value/1e7:.2f} Cr"
-        if abs(value) >= 1e5:
-            return f"₹{value/1e5:.2f} L"
-        if abs(value) >= 1e3:
-            return f"₹{value/1e3:.2f} K"
+        if abs(value) >= 1e7: return f"₹{value/1e7:.2f} Cr"
+        if abs(value) >= 1e5: return f"₹{value/1e5:.2f} L"
+        if abs(value) >= 1e3: return f"₹{value/1e3:.2f} K"
         return f"₹{value:.2f}"
 
     @staticmethod
-    def format_expiry_date(date_str: str) -> str:
-        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y"):
-            try:
-                return datetime.strptime(date_str, fmt).strftime("%d-%b-%Y (%A)")
-            except ValueError:
-                continue
-        return date_str
-
-    @staticmethod
-    def calculate_option_greeks(
-        spot, strike, tte_days, vol, rate, opt_type,
-    ) -> Dict[str, float]:
-        if not _HAS_SCIPY:
-            return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0}
-        try:
-            S, K, r, s = spot, strike, rate, vol
-            T = max(tte_days / 365, 0.0001)
-            d1 = (log(S/K) + (r + s**2/2)*T) / (s*sqrt(T))
-            d2 = d1 - s*sqrt(T)
-            if opt_type.upper() in ("CE", "CALL"):
-                delta = _norm.cdf(d1)
-                theta = (-S*_norm.pdf(d1)*s/(2*sqrt(T))
-                         - r*K*exp(-r*T)*_norm.cdf(d2)) / 365
-            else:
-                delta = _norm.cdf(d1) - 1
-                theta = (-S*_norm.pdf(d1)*s/(2*sqrt(T))
-                         + r*K*exp(-r*T)*_norm.cdf(-d2)) / 365
-            gamma = _norm.pdf(d1) / (S*s*sqrt(T))
-            vega = S * _norm.pdf(d1) * sqrt(T) / 100
-            return {
-                "delta": round(delta, 4), "gamma": round(gamma, 6),
-                "theta": round(theta, 4), "vega": round(vega, 4),
-            }
-        except Exception:
-            return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0}
+    def format_expiry_date(d: str) -> str:
+        for fmt in ("%Y-%m-%d", "%d-%b-%Y"):
+            try: return datetime.strptime(d, fmt).strftime("%d-%b-%Y (%A)")
+            except: continue
+        return d
 
 
 class OptionChainAnalyzer:
-
     @staticmethod
     def process_option_chain(data: Dict) -> pd.DataFrame:
-        if not data or "Success" not in data:
-            return pd.DataFrame()
+        if not data or "Success" not in data: return pd.DataFrame()
         records = data["Success"]
-        if not records:
-            return pd.DataFrame()
+        if not records: return pd.DataFrame()
         df = pd.DataFrame(records)
-        nums = [
-            "strike_price", "ltp", "best_bid_price", "best_offer_price",
-            "open", "high", "low", "previous_close", "ltp_percent_change",
-            "volume", "open_interest", "total_buy_qty", "total_sell_qty",
-        ]
-        for c in nums:
+        for c in ["strike_price","ltp","best_bid_price","best_offer_price",
+                   "open","high","low","volume","open_interest",
+                   "ltp_percent_change"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
 
     @staticmethod
     def calculate_pcr(df: pd.DataFrame) -> float:
-        if df.empty or "right" not in df.columns:
-            return 0.0
-        call_oi = df[df["right"] == "Call"]["open_interest"].sum()
-        put_oi = df[df["right"] == "Put"]["open_interest"].sum()
-        return put_oi / call_oi if call_oi else 0.0
+        if df.empty or "right" not in df.columns: return 0.0
+        c_oi = df[df["right"]=="Call"]["open_interest"].sum()
+        p_oi = df[df["right"]=="Put"]["open_interest"].sum()
+        return p_oi / c_oi if c_oi else 0.0
 
     @staticmethod
-    def get_max_pain(df: pd.DataFrame, strike_gap: int) -> int:
-        if df.empty or "strike_price" not in df.columns:
-            return 0
+    def get_max_pain(df: pd.DataFrame, gap: int) -> int:
+        if df.empty or "strike_price" not in df.columns: return 0
         strikes = df["strike_price"].unique()
         pain = {}
         for s in strikes:
-            cp = ((s - df[(df["right"]=="Call") & (df["strike_price"]<s)]["strike_price"])
-                  * df[(df["right"]=="Call") & (df["strike_price"]<s)]["open_interest"]).sum()
-            pp = ((df[(df["right"]=="Put") & (df["strike_price"]>s)]["strike_price"] - s)
-                  * df[(df["right"]=="Put") & (df["strike_price"]>s)]["open_interest"]).sum()
+            cp = ((s - df[(df["right"]=="Call")&(df["strike_price"]<s)]["strike_price"])
+                  * df[(df["right"]=="Call")&(df["strike_price"]<s)]["open_interest"]).sum()
+            pp = ((df[(df["right"]=="Put")&(df["strike_price"]>s)]["strike_price"] - s)
+                  * df[(df["right"]=="Put")&(df["strike_price"]>s)]["open_interest"]).sum()
             pain[s] = cp + pp
         return int(min(pain, key=pain.get)) if pain else 0
