@@ -1,707 +1,609 @@
 """
-Breeze Options Trader — Main Application.
-═════════════════════════════════════════
-v3.3 — Smart credential management:
-  • API Key & Secret from Streamlit Secrets (set once)
-  • Only Session Token entered daily via UI
+Breeze Options Trader — Complete Application.
+═══════════════════════════════════════════════
+Every navigation link works. Option chain displays properly.
+Smart credential management. Correct position detection.
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
 from functools import wraps
-import time
-import logging
+import time, logging
 
-from app_config import Config
-from session_manager import SessionManager, CredentialManager, NotificationManager
-from breeze_client import BreezeClientWrapper
-from utils import Utils, OptionChainAnalyzer, PositionUtils
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SETUP
-# ══════════════════════════════════════════════════════════════════════════════
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-st.set_page_config(
-    page_title="Breeze Options Trader",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
+import app_config as C
+from breeze_client import Client
+from utils import (
+    si, sf, detect_type, close_action, calc_pnl,
+    market_status, fmt_inr, fmt_expiry,
+    process_oc, oc_pivot, oc_pcr, oc_max_pain, oc_atm, R,
 )
 
-st.markdown("""
-<style>
-.main-header {
-    font-size:2.5rem; font-weight:bold;
-    background:linear-gradient(90deg,#1f77b4,#2ecc71);
-    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-    text-align:center; padding:1rem;
-}
-.page-header {
-    font-size:1.8rem; font-weight:bold; color:#1f77b4;
-    border-bottom:3px solid #1f77b4; padding-bottom:.5rem; margin-bottom:1rem;
-}
-.status-connected {
-    background:#d4edda; color:#155724;
-    padding:4px 12px; border-radius:12px; font-weight:600;
-}
-.cred-ok { color:#28a745; }
-.cred-missing { color:#dc3545; }
-.profit  { color:#28a745!important; font-weight:bold; }
-.loss    { color:#dc3545!important; font-weight:bold; }
-.warning-box { background:#fff3cd; border-left:4px solid #ffc107;
-    padding:1rem; margin:1rem 0; border-radius:0 8px 8px 0; }
-.info-box { background:#e7f3ff; border-left:4px solid #2196F3;
-    padding:1rem; margin:1rem 0; border-radius:0 8px 8px 0; }
-.success-box { background:#d4edda; border-left:4px solid #28a745;
-    padding:1rem; margin:1rem 0; border-radius:0 8px 8px 0; }
-.danger-box { background:#f8d7da; border-left:4px solid #dc3545;
-    padding:1rem; margin:1rem 0; border-radius:0 8px 8px 0; }
-.stButton>button { width:100%; }
-</style>
-""", unsafe_allow_html=True)
+log = logging.getLogger(__name__)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG & CSS
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.set_page_config(page_title="Breeze Options Trader", page_icon="📈",
+                   layout="wide", initial_sidebar_state="expanded")
+
+st.markdown("""<style>
+.hdr{font-size:2.2rem;font-weight:bold;text-align:center;padding:.8rem;
+  background:linear-gradient(90deg,#1f77b4,#2ecc71);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.ph{font-size:1.6rem;font-weight:bold;color:#1f77b4;
+  border-bottom:3px solid #1f77b4;padding-bottom:.4rem;margin-bottom:1rem}
+.con{background:#d4edda;color:#155724;padding:3px 10px;border-radius:10px;font-weight:600}
+.wb{background:#fff3cd;border-left:4px solid #ffc107;padding:.8rem;margin:.8rem 0;border-radius:0 6px 6px 0}
+.ib{background:#e7f3ff;border-left:4px solid #2196F3;padding:.8rem;margin:.8rem 0;border-radius:0 6px 6px 0}
+.sb{background:#d4edda;border-left:4px solid #28a745;padding:.8rem;margin:.8rem 0;border-radius:0 6px 6px 0}
+.db{background:#f8d7da;border-left:4px solid #dc3545;padding:.8rem;margin:.8rem 0;border-radius:0 6px 6px 0}
+.profit{color:#28a745!important;font-weight:bold}
+.loss{color:#dc3545!important;font-weight:bold}
+.stButton>button{width:100%}
+.atm-row{background:#fffde7!important}
+</style>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HELPERS
+# STATE HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def safe_int(v):
-    try: return int(float(str(v).strip())) if v else 0
-    except: return 0
+def auth() -> bool:
+    return st.session_state.get("authenticated", False)
 
-def safe_float(v):
-    try: return float(str(v).strip()) if v else 0.0
-    except: return 0.0
+def cli() -> Client:
+    return st.session_state.get("breeze")
 
+def go(page: str):
+    st.session_state.page = page
 
-class APIResp:
-    """Normalise Breeze responses (Success can be dict or list)."""
-    def __init__(self, raw: Dict):
-        self.raw = raw
-        self.ok = raw.get("success", False)
-        self.msg = raw.get("message", "Unknown error")
-        d = raw.get("data", {})
-        s = d.get("Success") if isinstance(d, dict) else None
-        if isinstance(s, dict):
-            self._single = s
-        elif isinstance(s, list) and s and isinstance(s[0], dict):
-            self._single = s[0]
-        else:
-            self._single = {}
+def page() -> str:
+    return st.session_state.get("page", "Dashboard")
 
-    @property
-    def data(self): return self._single
+def has_secrets() -> bool:
+    try:
+        return bool(st.secrets.get("BREEZE_API_KEY")) and bool(st.secrets.get("BREEZE_API_SECRET"))
+    except Exception:
+        return False
 
-    @property
-    def items(self):
-        if not self.ok: return []
-        d = self.raw.get("data", {})
-        s = d.get("Success") if isinstance(d, dict) else None
-        if isinstance(s, list): return s
-        if isinstance(s, dict): return [s]
-        return []
+def log_activity(action: str, detail: str = ""):
+    if "activity_log" not in st.session_state:
+        st.session_state.activity_log = []
+    st.session_state.activity_log.insert(0, {
+        "time": datetime.now(C.IST).strftime("%H:%M:%S"),
+        "action": action, "detail": detail,
+    })
+    st.session_state.activity_log = st.session_state.activity_log[:50]
 
-    def get(self, k, default=None): return self._single.get(k, default)
+def cache_oc(key, df):
+    st.session_state.oc_cache[key] = df
+    st.session_state.oc_ts[key] = datetime.now()
 
+def get_oc(key, ttl=30):
+    if key not in st.session_state.get("oc_cache", {}):
+        return None
+    ts = st.session_state.get("oc_ts", {}).get(key)
+    if ts and (datetime.now() - ts).seconds < ttl:
+        return st.session_state.oc_cache[key]
+    return None
 
-def api_guard(fn):
+def guard(fn):
     @wraps(fn)
     def w(*a, **kw):
-        try: return fn(*a, **kw)
+        try:
+            return fn(*a, **kw)
         except Exception as e:
-            logger.error(f"{fn.__name__}: {e}")
+            log.error(f"{fn.__name__}: {e}")
             st.error(f"❌ {e}")
     return w
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# NAVIGATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-ALL_PAGES = [
-    "Dashboard", "Option Chain", "Sell Options",
-    "Square Off", "Orders & Trades", "Positions",
-]
-PAGE_ICONS = {
-    "Dashboard": "🏠", "Option Chain": "📊", "Sell Options": "💰",
-    "Square Off": "🔄", "Orders & Trades": "📋", "Positions": "📍",
-}
-AUTH_REQUIRED = {"Option Chain", "Sell Options", "Square Off",
-                 "Orders & Trades", "Positions"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
-def render_sidebar():
+PAGES = ["Dashboard", "Option Chain", "Sell Options",
+         "Square Off", "Orders & Trades", "Positions"]
+ICONS = {"Dashboard": "🏠", "Option Chain": "📊", "Sell Options": "💰",
+         "Square Off": "🔄", "Orders & Trades": "📋", "Positions": "📍"}
+AUTH_PAGES = set(PAGES[1:])
+
+
+def sidebar():
     with st.sidebar:
         st.markdown("## 📈 Breeze Trader")
         st.markdown("---")
 
-        # Navigation
-        available = ALL_PAGES if SessionManager.is_authenticated() else ["Dashboard"]
-        cur = SessionManager.get_page()
-        if cur not in available:
+        # ── Nav ───────────────────────────────────────────────────
+        avail = PAGES if auth() else ["Dashboard"]
+        cur = page()
+        if cur not in avail:
             cur = "Dashboard"
-
-        sel = st.radio(
-            "Navigation", available,
-            index=available.index(cur),
-            format_func=lambda p: f"{PAGE_ICONS.get(p, '📄')} {p}",
-            label_visibility="collapsed",
-        )
+        sel = st.radio("Nav", avail, index=avail.index(cur),
+                       format_func=lambda p: f"{ICONS[p]} {p}",
+                       label_visibility="collapsed")
         if sel != cur:
-            SessionManager.set_page(sel)
-            st.rerun()
+            go(sel); st.rerun()
 
         st.markdown("---")
 
-        # Authentication
-        if not SessionManager.is_authenticated():
-            _render_smart_login()
+        # ── Auth ──────────────────────────────────────────────────
+        if not auth():
+            _login()
         else:
-            _render_account_panel()
+            _account()
 
         st.markdown("---")
 
-        # Settings
-        st.markdown("### ⚙️ Settings")
-        st.selectbox("Instrument", list(Config.INSTRUMENTS.keys()),
+        # ── Settings ──────────────────────────────────────────────
+        st.selectbox("Instrument", list(C.INSTRUMENTS.keys()),
                      key="selected_instrument")
-        st.session_state.debug_mode = st.checkbox(
-            "🔧 Debug", value=st.session_state.get("debug_mode", False))
-
-        st.markdown("---")
-        st.caption("Breeze Options Trader v3.3")
+        st.session_state.debug = st.checkbox(
+            "🔧 Debug", value=st.session_state.get("debug", False))
+        st.caption("v4.0")
 
 
-def _render_smart_login():
-    """
-    Smart login flow:
-    • If API Key & Secret are in Streamlit Secrets → only ask for Session Token
-    • If not → ask for all three
-    """
-    has_secrets = CredentialManager.has_stored_credentials()
+def _login():
+    """Smart login: only token if secrets configured, else full form."""
+    secrets_ok = has_secrets()
 
-    if has_secrets:
-        # ── FAST LOGIN: Only Session Token ────────────────────────────
-        st.markdown("### 🔑 Daily Login")
-
-        st.markdown("""
-        <div class="success-box">
-        ✅ API Key & Secret loaded from secrets.<br>
-        Just enter today's <b>Session Token</b>.
-        </div>
-        """, unsafe_allow_html=True)
-
-        with st.form("fast_login", clear_on_submit=False):
-            token = st.text_input(
-                "Session Token",
-                type="password",
-                placeholder="Paste today's session token",
-                help="Get from ICICI Direct → API → Generate Session Token",
-            )
-
+    if secrets_ok:
+        st.markdown('<div class="sb">✅ API Key & Secret loaded from secrets.<br>'
+                    'Enter today\'s <b>Session Token</b>.</div>', unsafe_allow_html=True)
+        with st.form("fast_login"):
+            token = st.text_input("Session Token", type="password",
+                                  placeholder="Today's token from ICICI")
             if st.form_submit_button("🔑 Connect", use_container_width=True):
                 if not token:
-                    st.warning("⚠️ Enter session token")
-                    return
-
-                api_key = CredentialManager.get_stored_api_key()
-                api_secret = CredentialManager.get_stored_api_secret()
-
-                with st.spinner("Connecting..."):
-                    client = BreezeClientWrapper(api_key, api_secret)
-                    result = client.connect(token)
-
-                    if result["success"]:
-                        CredentialManager.save_session_credentials(
-                            api_key, api_secret, token)
-                        SessionManager.set_authenticated(True, client)
-                        NotificationManager.toast("Connected!", "✅")
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {result['message']}")
-                        logger.error(f"Login failed: {result['message']}")
-
-        # Link to full login
-        with st.expander("🔧 Use different credentials"):
-            _render_full_login()
-
+                    st.warning("Enter token"); return
+                _do_connect(st.secrets["BREEZE_API_KEY"],
+                            st.secrets["BREEZE_API_SECRET"], token)
+        with st.expander("Use different credentials"):
+            _full_login()
     else:
-        # ── FULL LOGIN: All three credentials ─────────────────────────
-        st.markdown("### 🔐 Login")
-
-        st.markdown("""
-        <div class="info-box">
-        💡 <b>Tip:</b> Store API Key & Secret in
-        <a href="https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management"
-           target="_blank">Streamlit Secrets</a>
-        so you only need to enter the Session Token daily.
-        </div>
-        """, unsafe_allow_html=True)
-
-        _render_full_login()
+        st.markdown('<div class="ib">💡 Store API Key & Secret in '
+                    '<b>Streamlit Secrets</b> for daily quick login.</div>',
+                    unsafe_allow_html=True)
+        _full_login()
 
 
-def _render_full_login():
-    """Full login form with all three fields."""
-    with st.form("full_login", clear_on_submit=False):
-        api_key, api_secret, _ = CredentialManager.get_all_credentials()
-
-        nk = st.text_input("API Key", value=api_key, type="password")
-        ns = st.text_input("API Secret", value=api_secret, type="password")
-        nt = st.text_input("Session Token", type="password",
-                           placeholder="Today's token from ICICI")
-
-        st.caption("💡 Session token changes daily from ICICI Direct")
-
+def _full_login():
+    with st.form("full_login"):
+        k = st.text_input("API Key", type="password")
+        s = st.text_input("API Secret", type="password")
+        t = st.text_input("Session Token", type="password")
         if st.form_submit_button("🔑 Connect", use_container_width=True):
-            if not all([nk, ns, nt]):
-                st.warning("Fill all fields")
-                return
-
-            with st.spinner("Connecting..."):
-                client = BreezeClientWrapper(nk, ns)
-                result = client.connect(nt)
-
-                if result["success"]:
-                    CredentialManager.save_session_credentials(nk, ns, nt)
-                    SessionManager.set_authenticated(True, client)
-                    st.success("✅ Connected!")
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.error(f"❌ {result['message']}")
+            if not all([k, s, t]):
+                st.warning("Fill all fields"); return
+            _do_connect(k, s, t)
 
 
-def _render_account_panel():
-    """Account info, session health, disconnect."""
-    cl = SessionManager.get_client()
-    if not cl:
-        return
-
-    st.markdown('<span class="status-connected">✅ Connected</span>',
-                unsafe_allow_html=True)
-
-    # User info
-    try:
-        r = APIResp(cl.get_customer_details())
-        name = r.get("name", "User")
-        st.session_state.user_name = name
-        st.markdown(f"**👤 {name}**")
-    except Exception:
-        st.markdown(f"**👤 {st.session_state.get('user_name', 'User')}**")
-
-    # Session duration
-    duration = SessionManager.get_login_duration()
-    if duration:
-        st.caption(f"⏱️ Session: {duration}")
-
-    # Session health warning
-    if SessionManager.is_session_token_stale():
-        st.warning("⚠️ Session may be stale — consider reconnecting")
-
-    # Market status
-    st.markdown(f"**{Utils.get_market_status()}**")
-
-    # Funds (cached)
-    try:
-        cached_funds = SessionManager.get_cached_funds()
-        if cached_funds:
-            avail = safe_float(cached_funds.get("available_margin", 0))
+def _do_connect(key, secret, token):
+    with st.spinner("Connecting..."):
+        c = Client(key, secret)
+        r = c.connect(token)
+        if r["success"]:
+            st.session_state.authenticated = True
+            st.session_state.breeze = c
+            st.session_state.login_time = datetime.now(C.IST).isoformat()
+            log_activity("Connected")
+            st.success("✅ Connected!")
+            time.sleep(0.5); st.rerun()
         else:
-            r = APIResp(cl.get_funds())
-            avail = safe_float(r.get("available_margin", 0))
-            if r.ok:
-                SessionManager.cache_funds(r.data)
-        st.metric("Margin", Utils.format_currency(avail))
+            st.error(f"❌ {r['message']}")
+
+
+def _account():
+    c = cli()
+    if not c: return
+    st.markdown('<span class="con">✅ Connected</span>', unsafe_allow_html=True)
+
+    try:
+        r = R(c.customer())
+        st.markdown(f"**👤 {r.get('name', 'User')}**")
     except Exception:
         pass
 
-    # Credential status
-    with st.expander("🔑 Credential Status"):
-        status = CredentialManager.get_credential_status()
-        for label, key, val in [
-            ("API Key (secrets)", "api_key_in_secrets", status["api_key_in_secrets"]),
-            ("API Secret (secrets)", "api_secret_in_secrets", status["api_secret_in_secrets"]),
-            ("Session Token", "session_token_available", status["session_token_available"]),
-        ]:
-            icon = "✅" if val else "❌"
-            st.write(f"{icon} {label}")
+    # Session duration
+    lt = st.session_state.get("login_time")
+    if lt:
+        try:
+            d = datetime.now(C.IST) - datetime.fromisoformat(lt)
+            h, m = divmod(int(d.total_seconds()) // 60, 60)
+            st.caption(f"⏱ {h}h {m}m")
+            if d.total_seconds() > 28800:
+                st.warning("⚠️ Session may be stale")
+        except Exception:
+            pass
 
-    # Disconnect
+    st.markdown(f"**{market_status()}**")
+
+    try:
+        r = R(c.funds())
+        st.metric("Margin", fmt_inr(sf(r.get("available_margin", 0))))
+    except Exception:
+        pass
+
     if st.button("🔓 Disconnect", use_container_width=True):
-        SessionManager.set_authenticated(False)
-        CredentialManager.clear_session_credentials()
-        SessionManager.set_page("Dashboard")
-        SessionManager.clear_cache()
-        st.rerun()
+        st.session_state.authenticated = False
+        st.session_state.breeze = None
+        go("Dashboard"); st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def page_dashboard():
-    st.markdown('<div class="page-header">🏠 Dashboard</div>',
-                unsafe_allow_html=True)
+def pg_dash():
+    st.markdown('<div class="ph">🏠 Dashboard</div>', unsafe_allow_html=True)
 
-    # Show any pending notifications
-    NotificationManager.show_pending_messages()
-
-    if not SessionManager.is_authenticated():
-        _welcome()
+    if not auth():
+        # Welcome
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("### 📊 Data\n- Live option chain\n- Real-time quotes\n- OI analysis")
+        c2.markdown("### 💰 Trade\n- Sell options\n- Quick square off\n- Order management")
+        c3.markdown("### 🛡️ Risk\n- Margin check\n- P&L tracking\n- Debug mode")
+        st.markdown("---")
+        st.subheader("📈 Instruments")
+        st.dataframe(pd.DataFrame([{
+            "Name": n, "Code": cfg["stock_code"], "Exchange": cfg["exchange"],
+            "Lot": cfg["lot"], "Gap": cfg["gap"], "Expiry": cfg["expiry_day"],
+        } for n, cfg in C.INSTRUMENTS.items()]), hide_index=True, use_container_width=True)
+        st.info("👈 **Login to start**")
         return
 
-    cl = SessionManager.get_client()
+    c = cli()
+    st.subheader(f"📈 {market_status()}")
 
-    # Session health check
-    if SessionManager.is_session_token_stale():
-        st.markdown("""<div class="warning-box">
-        ⚠️ <b>Session may be stale.</b> ICICI tokens reset daily.
-        Consider disconnecting and entering today's session token.
-        </div>""", unsafe_allow_html=True)
-
-    # Account
-    st.subheader(f"📈 {Utils.get_market_status()}")
+    # Funds
     try:
-        cached = SessionManager.get_cached_funds()
-        if cached:
-            f_data = cached
-        else:
-            f = APIResp(cl.get_funds())
-            f_data = f.data if f.ok else {}
-            if f.ok:
-                SessionManager.cache_funds(f_data)
-
-        av = safe_float(f_data.get("available_margin", 0))
-        us = safe_float(f_data.get("utilized_margin", 0))
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Available", Utils.format_currency(av))
-        c2.metric("Used", Utils.format_currency(us))
-        c3.metric("Total", Utils.format_currency(av + us))
+        f = R(c.funds())
+        av, us = sf(f.get("available_margin", 0)), sf(f.get("utilized_margin", 0))
+        mc = st.columns(3)
+        mc[0].metric("Available", fmt_inr(av))
+        mc[1].metric("Used", fmt_inr(us))
+        mc[2].metric("Total", fmt_inr(av + us))
     except Exception:
         pass
 
     st.markdown("---")
 
-    # Positions summary
-    st.subheader("📍 Open Positions")
+    # Positions
+    st.subheader("📍 Positions")
     try:
-        pos = APIResp(cl.get_portfolio_positions())
-        active = [p for p in pos.items if safe_int(p.get("quantity", 0)) != 0]
+        pos = R(c.positions())
+        active = [p for p in pos.items if si(p.get("quantity")) != 0]
         if not active:
             st.info("📭 No open positions")
         else:
-            total_pnl = 0.0
+            tot = 0.0
             rows = []
             for p in active:
-                pt = PositionUtils.detect_type(p)
-                q = abs(safe_int(p.get("quantity", 0)))
-                avg = safe_float(p.get("average_price", 0))
-                ltp = safe_float(p.get("ltp", avg))
-                pnl = PositionUtils.calc_pnl(pt, avg, ltp, q)
-                total_pnl += pnl
-                rows.append({
-                    "Instrument": Config.get_instrument_display(p.get("stock_code", "")),
-                    "Strike": p.get("strike_price", ""),
-                    "Type": p.get("right", ""),
-                    "Position": pt.upper(),
-                    "Qty": q,
-                    "P&L": f"₹{pnl:+,.2f}",
-                })
+                pt = detect_type(p)
+                q = abs(si(p.get("quantity")))
+                avg, ltp = sf(p.get("average_price")), sf(p.get("ltp", p.get("average_price")))
+                pnl = calc_pnl(pt, avg, ltp, q)
+                tot += pnl
+                rows.append({"Instrument": C.display_name(p.get("stock_code", "")),
+                             "Strike": p.get("strike_price"), "Type": p.get("right"),
+                             "Pos": pt.upper(), "Qty": q, "P&L": f"₹{pnl:+,.2f}"})
             c1, c2 = st.columns([3, 1])
             c1.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-            c2.metric("Total P&L", f"₹{total_pnl:+,.2f}",
-                       delta_color="normal" if total_pnl >= 0 else "inverse")
+            c2.metric("Total P&L", f"₹{tot:+,.2f}",
+                       delta_color="normal" if tot >= 0 else "inverse")
     except Exception as e:
-        st.warning(f"Could not load positions: {e}")
+        st.warning(f"Positions: {e}")
 
     st.markdown("---")
-
-    # Quick actions
     st.subheader("⚡ Quick Actions")
-    c1, c2, c3, c4 = st.columns(4)
-    if c1.button("📊 Option Chain", use_container_width=True):
-        SessionManager.set_page("Option Chain"); st.rerun()
-    if c2.button("💰 Sell Options", use_container_width=True):
-        SessionManager.set_page("Sell Options"); st.rerun()
-    if c3.button("🔄 Square Off", use_container_width=True):
-        SessionManager.set_page("Square Off"); st.rerun()
-    if c4.button("📋 Orders & Trades", use_container_width=True):
-        SessionManager.set_page("Orders & Trades"); st.rerun()
+    cc = st.columns(4)
+    if cc[0].button("📊 Option Chain", use_container_width=True): go("Option Chain"); st.rerun()
+    if cc[1].button("💰 Sell Options", use_container_width=True): go("Sell Options"); st.rerun()
+    if cc[2].button("🔄 Square Off", use_container_width=True): go("Square Off"); st.rerun()
+    if cc[3].button("📋 Orders", use_container_width=True): go("Orders & Trades"); st.rerun()
 
-    # Session activity log
-    history = SessionManager.get_order_history()
-    if history:
+    # Activity log
+    al = st.session_state.get("activity_log", [])
+    if al:
         st.markdown("---")
-        st.subheader("📝 Recent Activity (this session)")
-        st.dataframe(pd.DataFrame(history[:10]), hide_index=True, use_container_width=True)
-
-
-def _welcome():
-    c1, c2, c3 = st.columns(3)
-    c1.markdown("### 📊 Data\n- Option chain\n- Live quotes\n- OI analysis")
-    c2.markdown("### 💰 Trade\n- Sell options\n- Square off\n- Order tracking")
-    c3.markdown("### 🛡️ Risk\n- Margin calc\n- P&L tracking\n- Debug mode")
-
-    st.markdown("---")
-
-    # Credential setup guide
-    if not CredentialManager.has_stored_credentials():
-        st.markdown("""<div class="info-box">
-        <b>🔧 First-time Setup:</b><br><br>
-        Store your API Key & Secret in Streamlit Secrets so you only
-        enter the Session Token daily:<br><br>
-        <b>Streamlit Cloud:</b> App → Manage → Settings → Secrets<br>
-        <b>Local:</b> Create <code>.streamlit/secrets.toml</code><br><br>
-        <pre>
-BREEZE_API_KEY = "your_key"
-BREEZE_API_SECRET = "your_secret"
-        </pre>
-        </div>""", unsafe_allow_html=True)
-
-    st.subheader("📈 Supported Instruments")
-    rows = [{
-        "Name": name, "API Code": cfg["stock_code"],
-        "Exchange": cfg["exchange"], "Lot": cfg["lot_size"],
-        "Gap": cfg["strike_gap"], "Expiry": cfg["expiry_day"],
-    } for name, cfg in Config.INSTRUMENTS.items()]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-    st.info("👈 **Login to start trading**")
+        with st.expander("📝 Session Activity"):
+            st.dataframe(pd.DataFrame(al[:15]), hide_index=True, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: OPTION CHAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_guard
-def page_option_chain():
-    st.markdown('<div class="page-header">📊 Option Chain</div>', unsafe_allow_html=True)
-    cl = SessionManager.get_client()
-    if not cl: st.warning("Connect first"); return
+@guard
+def pg_oc():
+    st.markdown('<div class="ph">📊 Option Chain</div>', unsafe_allow_html=True)
+    c = cli()
+    if not c: st.warning("Connect first"); return
 
-    c1, c2, c3 = st.columns([2, 2, 1])
-    with c1:
-        instrument = st.selectbox("Instrument", list(Config.INSTRUMENTS.keys()), key="oc_inst")
-    cfg = Config.INSTRUMENTS[instrument]
-    with c2:
-        expiry = st.selectbox("Expiry", Config.get_next_expiries(instrument, 5),
-                              format_func=Utils.format_expiry_date, key="oc_exp")
-    with c3:
+    # Controls
+    cc = st.columns([2, 2, 1])
+    with cc[0]:
+        inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="oc_i")
+    cfg = C.INSTRUMENTS[inst]
+    with cc[1]:
+        exp = st.selectbox("Expiry", C.get_expiries(inst, 5),
+                           format_func=fmt_expiry, key="oc_e")
+    with cc[2]:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh = st.button("🔄", key="oc_ref", use_container_width=True)
+        refresh = st.button("🔄 Refresh", key="oc_r", use_container_width=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        filt = st.radio("Show", ["All", "Calls", "Puts"], horizontal=True, key="oc_filt")
-    with c2:
-        nstrikes = st.slider("Strikes", 5, 30, 15, key="oc_ns")
+    # View controls
+    cc2 = st.columns([2, 1, 1])
+    with cc2[0]:
+        view = st.radio("View", ["Traditional", "Flat", "Calls Only", "Puts Only"],
+                        horizontal=True, key="oc_v")
+    with cc2[1]:
+        nstrikes = st.slider("Strikes ±ATM", 5, 30, 12, key="oc_n")
 
-    cache_key = f"oc_{cfg['stock_code']}_{expiry}"
-    cached = None if refresh else SessionManager.get_cached_option_chain(cache_key)
+    # Fetch
+    ck = f"{cfg['stock_code']}_{exp}"
+    cached = None if refresh else get_oc(ck)
 
     if cached is not None:
         df = cached
-        st.caption("📦 Cached")
+        st.caption("📦 Cached (30s)")
     else:
-        with st.spinner("Loading..."):
-            raw = cl.get_option_chain(cfg["stock_code"], cfg["exchange"], expiry)
-        r = APIResp(raw)
-        if not r.ok: st.error(r.msg); return
-        df = OptionChainAnalyzer.process_option_chain(raw.get("data", {}))
-        if df.empty: st.warning("No data"); return
-        SessionManager.cache_option_chain(cache_key, df)
+        with st.spinner(f"Loading {inst} ({cfg['stock_code']}) option chain..."):
+            raw = c.option_chain(cfg["stock_code"], cfg["exchange"], exp)
 
-    st.subheader(f"{instrument} ({cfg['stock_code']}) — {Utils.format_expiry_date(expiry)}")
+        if not raw["success"]:
+            st.error(f"❌ {raw['message']}")
+            if st.session_state.get("debug"):
+                st.json(raw)
+            return
 
-    pcr = OptionChainAnalyzer.calculate_pcr(df)
-    mp = OptionChainAnalyzer.get_max_pain(df, cfg["strike_gap"])
-    call_oi = df[df["right"]=="Call"]["open_interest"].sum() if "right" in df.columns else 0
-    put_oi = df[df["right"]=="Put"]["open_interest"].sum() if "right" in df.columns else 0
+        df = process_oc(raw["data"])
 
-    mc = st.columns(4)
+        if df.empty:
+            st.warning("No option chain data returned.")
+            if st.session_state.get("debug"):
+                st.write("Raw data keys:", list(raw.get("data", {}).keys()))
+                success = raw.get("data", {}).get("Success", [])
+                st.write(f"Success items: {len(success) if isinstance(success, list) else 'not a list'}")
+                if isinstance(success, list) and success:
+                    st.json(success[0])
+            return
+
+        cache_oc(ck, df)
+        log_activity("Option Chain", f"{inst} {fmt_expiry(exp)}")
+
+    # Header
+    st.subheader(f"{inst} ({cfg['stock_code']}) — {fmt_expiry(exp)}")
+
+    # Metrics
+    pcr = oc_pcr(df)
+    mp = oc_max_pain(df)
+    atm = oc_atm(df)
+    call_oi = df[df["right"] == "Call"]["open_interest"].sum() if "right" in df.columns else 0
+    put_oi = df[df["right"] == "Put"]["open_interest"].sum() if "right" in df.columns else 0
+
+    mc = st.columns(5)
     mc[0].metric("PCR", f"{pcr:.2f}", delta="Bullish" if pcr > 1 else "Bearish")
     mc[1].metric("Max Pain", f"{mp:,}")
-    mc[2].metric("Call OI", f"{call_oi:,.0f}")
-    mc[3].metric("Put OI", f"{put_oi:,.0f}")
+    mc[2].metric("ATM ≈", f"{atm:,.0f}")
+    mc[3].metric("Call OI", f"{call_oi:,.0f}")
+    mc[4].metric("Put OI", f"{put_oi:,.0f}")
 
-    show = df.copy()
-    if "right" in show.columns:
-        if filt == "Calls": show = show[show["right"]=="Call"]
-        elif filt == "Puts": show = show[show["right"]=="Put"]
+    st.markdown("---")
 
-    if "strike_price" in show.columns and not show.empty:
-        strikes = sorted(show["strike_price"].unique())
-        mid = len(strikes)//2
-        show = show[show["strike_price"].isin(strikes[max(0,mid-nstrikes):mid+nstrikes+1])]
+    # Filter strikes around ATM
+    if atm > 0 and "strike_price" in df.columns:
+        strikes = sorted(df["strike_price"].unique())
+        # Find ATM index
+        atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - atm))
+        lo = max(0, atm_idx - nstrikes)
+        hi = min(len(strikes), atm_idx + nstrikes + 1)
+        keep = strikes[lo:hi]
+        show_df = df[df["strike_price"].isin(keep)].copy()
+    else:
+        show_df = df.copy()
 
-    cols = ["strike_price","right","ltp","open_interest","volume","best_bid_price","best_offer_price"]
-    avail = [c for c in cols if c in show.columns]
-    names = {"strike_price":"Strike","right":"Type","ltp":"LTP","open_interest":"OI",
-             "volume":"Vol","best_bid_price":"Bid","best_offer_price":"Ask"}
-    st.dataframe(show[avail].rename(columns=names) if avail else show,
-                 use_container_width=True, height=500, hide_index=True)
+    # Display based on view selection
+    if view == "Traditional":
+        chain = oc_pivot(show_df)
+        if chain.empty:
+            st.warning("Cannot create pivot view")
+        else:
+            # Highlight ATM row
+            def highlight_atm(row):
+                if abs(row.get("Strike", 0) - atm) < cfg["gap"] / 2:
+                    return ["background-color: #fffde7; font-weight: bold"] * len(row)
+                return [""] * len(row)
 
-    if all(c in show.columns for c in ("right","strike_price","open_interest")):
+            styled = chain.style.apply(highlight_atm, axis=1)
+            styled = styled.format({c: "{:,.0f}" for c in chain.columns if c != "Strike"})
+            st.dataframe(styled, use_container_width=True, height=500, hide_index=True)
+
+    elif view == "Calls Only":
+        calls = show_df[show_df["right"] == "Call"] if "right" in show_df.columns else show_df
+        _show_flat(calls)
+    elif view == "Puts Only":
+        puts = show_df[show_df["right"] == "Put"] if "right" in show_df.columns else show_df
+        _show_flat(puts)
+    else:  # Flat
+        _show_flat(show_df)
+
+    # OI Chart
+    if "right" in show_df.columns and "open_interest" in show_df.columns:
         st.markdown("---")
         st.subheader("📊 OI Distribution")
-        calls = show[show["right"]=="Call"][["strike_price","open_interest"]].rename(columns={"open_interest":"Call OI"})
-        puts = show[show["right"]=="Put"][["strike_price","open_interest"]].rename(columns={"open_interest":"Put OI"})
-        merged = pd.merge(calls, puts, on="strike_price", how="outer").fillna(0).sort_values("strike_price")
+        calls_oi = show_df[show_df["right"] == "Call"][["strike_price", "open_interest"]].rename(
+            columns={"open_interest": "Call OI"})
+        puts_oi = show_df[show_df["right"] == "Put"][["strike_price", "open_interest"]].rename(
+            columns={"open_interest": "Put OI"})
+        merged = pd.merge(calls_oi, puts_oi, on="strike_price",
+                          how="outer").fillna(0).sort_values("strike_price")
         st.bar_chart(merged.set_index("strike_price"))
+
+    # Debug
+    if st.session_state.get("debug"):
+        with st.expander("🔧 Raw Data"):
+            st.write(f"Total rows: {len(df)}")
+            if "right" in df.columns:
+                st.write(f"Calls: {len(df[df['right']=='Call'])}, Puts: {len(df[df['right']=='Put'])}")
+                st.write(f"Right values: {df['right'].unique().tolist()}")
+            st.dataframe(df.head(20), hide_index=True)
+
+
+def _show_flat(df):
+    """Show flat table with standard columns."""
+    cols = ["strike_price", "right", "ltp", "open_interest", "volume",
+            "best_bid_price", "best_offer_price"]
+    av = [c for c in cols if c in df.columns]
+    names = {"strike_price": "Strike", "right": "Type", "ltp": "LTP",
+             "open_interest": "OI", "volume": "Vol",
+             "best_bid_price": "Bid", "best_offer_price": "Ask"}
+    st.dataframe(df[av].rename(columns=names).sort_values("Strike") if av else df,
+                 use_container_width=True, height=500, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SELL OPTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_guard
-def page_sell_options():
-    st.markdown('<div class="page-header">💰 Sell Options</div>', unsafe_allow_html=True)
-    cl = SessionManager.get_client()
-    if not cl: st.warning("Connect first"); return
+@guard
+def pg_sell():
+    st.markdown('<div class="ph">💰 Sell Options</div>', unsafe_allow_html=True)
+    c = cli()
+    if not c: st.warning("Connect first"); return
 
     c1, c2 = st.columns(2)
     with c1:
-        inst = st.selectbox("Instrument", list(Config.INSTRUMENTS.keys()), key="sl_i")
-        cfg = Config.INSTRUMENTS[inst]
-        exp = st.selectbox("Expiry", Config.get_next_expiries(inst,5),
-                           format_func=Utils.format_expiry_date, key="sl_e")
-        opt = st.radio("Option", ["CE (Call)","PE (Put)"], horizontal=True, key="sl_o")
+        inst = st.selectbox("Instrument", list(C.INSTRUMENTS.keys()), key="s_i")
+        cfg = C.INSTRUMENTS[inst]
+        exp = st.selectbox("Expiry", C.get_expiries(inst, 5),
+                           format_func=fmt_expiry, key="s_e")
+        opt = st.radio("Option", ["CE (Call)", "PE (Put)"], horizontal=True, key="s_o")
         oc = "CE" if "CE" in opt else "PE"
-        strike = st.number_input("Strike", min_value=0, step=cfg["strike_gap"], key="sl_s")
+        strike = st.number_input("Strike", min_value=0, step=cfg["gap"], key="s_s")
+
     with c2:
-        lots = st.number_input("Lots", 1, 100, 1, key="sl_l")
-        qty = lots * cfg["lot_size"]
-        st.info(f"**Qty:** {qty} ({lots}×{cfg['lot_size']})")
-        ot = st.radio("Order", ["Market","Limit"], horizontal=True, key="sl_ot")
-        price = st.number_input("Price", min_value=0.0, step=0.05, key="sl_p") if ot=="Limit" else 0.0
+        lots = st.number_input("Lots", 1, 100, 1, key="s_l")
+        qty = lots * cfg["lot"]
+        st.info(f"**Qty:** {qty} ({lots} × {cfg['lot']})")
+        ot = st.radio("Order", ["Market", "Limit"], horizontal=True, key="s_ot")
+        pr = st.number_input("Price", min_value=0.0, step=0.05, key="s_p") if ot == "Limit" else 0.0
 
     st.markdown("---")
-    c1,c2 = st.columns(2)
+    c1, c2 = st.columns(2)
     with c1:
-        if st.button("📊 Quote", use_container_width=True, disabled=strike<=0):
+        if st.button("📊 Quote", use_container_width=True, disabled=strike <= 0):
             with st.spinner("..."):
-                q = APIResp(cl.get_quotes(cfg["stock_code"],cfg["exchange"],exp,strike,oc))
+                q = R(c.quotes(cfg["stock_code"], cfg["exchange"], exp, strike, oc))
                 if q.ok:
                     d = q.items[0] if q.items else q.data
-                    st.success(f"LTP: ₹{d.get('ltp','?')} | Bid: ₹{d.get('best_bid_price','?')} | Ask: ₹{d.get('best_offer_price','?')}")
-                else: st.error(q.msg)
+                    st.success(f"LTP ₹{d.get('ltp','?')} · Bid ₹{d.get('best_bid_price','?')} · Ask ₹{d.get('best_offer_price','?')}")
+                else:
+                    st.error(q.msg)
     with c2:
-        if st.button("💰 Margin", use_container_width=True, disabled=strike<=0):
+        if st.button("💰 Margin", use_container_width=True, disabled=strike <= 0):
             with st.spinner("..."):
-                m = APIResp(cl.get_margin_required(cfg["stock_code"],cfg["exchange"],exp,strike,oc,"sell",qty))
+                m = R(c.margin(cfg["stock_code"], cfg["exchange"], exp, strike, oc, "sell", qty))
                 st.info(f"Margin: ₹{m.get('required_margin','?')}") if m.ok else st.warning("N/A")
 
-    st.markdown("""<div class="danger-box">⚠️ Option selling has <b>UNLIMITED RISK</b>.</div>""", unsafe_allow_html=True)
-    conf = st.checkbox("I understand the risks", key="sl_c")
-    ok = conf and strike>0 and strike%cfg["strike_gap"]==0 and (ot=="Market" or price>0)
+    st.markdown('<div class="db">⚠️ Option selling has <b>UNLIMITED RISK</b>.</div>', unsafe_allow_html=True)
+    ok = st.checkbox("I accept the risks", key="s_c") and strike > 0 and (ot == "Market" or pr > 0)
 
     if st.button(f"🔴 SELL {oc}", type="primary", use_container_width=True, disabled=not ok):
         with st.spinner("Placing..."):
-            fn = cl.sell_call if oc=="CE" else cl.sell_put
-            r = APIResp(fn(cfg["stock_code"],cfg["exchange"],exp,strike,qty,ot.lower(),price))
+            fn = c.sell_call if oc == "CE" else c.sell_put
+            r = R(fn(cfg["stock_code"], cfg["exchange"], exp, strike, qty, ot.lower(), pr))
             if r.ok:
-                st.markdown(f"""<div class="success-box">✅ Order Placed! ID: {r.get('order_id','?')}</div>""", unsafe_allow_html=True)
+                st.markdown(f'<div class="sb">✅ Order placed! ID: {r.get("order_id","?")}</div>',
+                            unsafe_allow_html=True)
                 st.balloons()
-                SessionManager.log_order({"action":"SELL","instrument":inst,"strike":strike,"type":oc,"qty":qty,"status":"placed"})
-                NotificationManager.order_placed(inst, strike, oc, qty, "sell")
+                log_activity("SELL", f"{inst} {strike} {oc} x{qty}")
             else:
                 st.error(f"❌ {r.msg}")
-                NotificationManager.order_failed(r.msg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SQUARE OFF
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_guard
-def page_square_off():
-    st.markdown('<div class="page-header">🔄 Square Off</div>', unsafe_allow_html=True)
-    cl = SessionManager.get_client()
-    if not cl: st.warning("Connect first"); return
-
-    debug = st.session_state.get("debug_mode", False)
+@guard
+def pg_sqoff():
+    st.markdown('<div class="ph">🔄 Square Off</div>', unsafe_allow_html=True)
+    c = cli()
+    if not c: st.warning("Connect first"); return
 
     with st.spinner("Loading..."):
-        resp = APIResp(cl.get_portfolio_positions())
+        resp = R(c.positions())
     if not resp.ok: st.error(resp.msg); return
 
     opts = []
     for p in resp.items:
-        if str(p.get("product_type","")).lower() != "options": continue
-        qty = safe_int(p.get("quantity",0))
-        if qty == 0: continue
-        pt = PositionUtils.detect_type(p)
-        avg = safe_float(p.get("average_price",0))
-        ltp = safe_float(p.get("ltp",avg))
-        p["_type"]=pt; p["_qty"]=abs(qty)
-        p["_action"]=PositionUtils.close_action(pt)
-        p["_pnl"]=PositionUtils.calc_pnl(pt,avg,ltp,abs(qty))
+        if str(p.get("product_type", "")).lower() != "options": continue
+        q = si(p.get("quantity"))
+        if q == 0: continue
+        pt = detect_type(p)
+        avg, ltp = sf(p.get("average_price")), sf(p.get("ltp", p.get("average_price")))
+        p["_t"] = pt; p["_q"] = abs(q); p["_a"] = close_action(pt)
+        p["_pnl"] = calc_pnl(pt, avg, ltp, abs(q))
         opts.append(p)
 
     if not opts: st.info("📭 No open option positions"); return
     st.success(f"**{len(opts)}** position(s)")
 
-    rows = [{
-        "Instrument": Config.get_instrument_display(p.get("stock_code","")),
-        "Strike": p.get("strike_price",""), "Option": p.get("right",""),
-        "Qty": p["_qty"], "Position": p["_type"].upper(),
-        "P&L": f"₹{p['_pnl']:+,.2f}", "To Close": p["_action"].upper(),
-    } for p in opts]
+    rows = [{"Instrument": C.display_name(p.get("stock_code","")),
+             "Strike": p.get("strike_price"), "Option": p.get("right"),
+             "Qty": p["_q"], "Position": p["_t"].upper(),
+             "P&L": f"₹{p['_pnl']:+,.2f}", "To Close": p["_a"].upper()}
+            for p in opts]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    if debug:
+    if st.session_state.get("debug"):
         with st.expander("🔧 Raw"):
-            for p in opts: st.json({k:v for k,v in p.items() if not k.startswith("_")})
+            for p in opts:
+                st.json({k: v for k, v in p.items() if not k.startswith("_")})
 
     st.markdown("---")
-    st.subheader("Square Off Individual")
-    labels = [f"{Config.get_instrument_display(p.get('stock_code',''))} {p.get('strike_price')} {p.get('right')} | {p['_type'].upper()} | Qty:{p['_qty']}" for p in opts]
+    st.subheader("Individual Square Off")
+    labels = [f"{C.display_name(p.get('stock_code',''))} {p.get('strike_price')} "
+              f"{p.get('right')} | {p['_t'].upper()} | Qty:{p['_q']}"
+              for p in opts]
     idx = st.selectbox("Position", range(len(labels)), format_func=lambda x: labels[x])
     sel = opts[idx]
+    act = sel["_a"]
 
-    act = sel["_action"]
-    st.markdown(f"""<div class="info-box">📌 <b>{sel['_type'].upper()}</b> position → will <b>{act.upper()}</b> to close.</div>""", unsafe_allow_html=True)
+    st.markdown(f'<div class="ib">📌 <b>{sel["_t"].upper()}</b> → will <b>{act.upper()}</b> to close.</div>',
+                unsafe_allow_html=True)
 
-    c1,c2 = st.columns(2)
-    with c1: sq_ot = st.radio("Order",["Market","Limit"],horizontal=True,key="sq_ot")
-    with c2: sq_pr = st.number_input("Price",min_value=0.0,step=0.05,key="sq_pr") if sq_ot=="Limit" else 0.0
-    sq_q = st.slider("Qty",1,sel["_qty"],sel["_qty"],key="sq_q")
+    c1, c2 = st.columns(2)
+    with c1: sq_ot = st.radio("Order", ["Market", "Limit"], horizontal=True, key="sq_ot")
+    with c2: sq_pr = st.number_input("Price", 0.0, step=0.05, key="sq_pr") if sq_ot == "Limit" else 0.0
+    sq_q = st.slider("Qty", 1, sel["_q"], sel["_q"], key="sq_q")
 
     if st.button(f"🔄 {act.upper()} {sq_q} to Close", type="primary", use_container_width=True):
         with st.spinner(f"{act.upper()}ing..."):
-            r = APIResp(cl.square_off_position(
+            r = R(c.square_off(
                 sel.get("stock_code"), sel.get("exchange_code"), sel.get("expiry_date"),
-                safe_int(sel.get("strike_price",0)), str(sel.get("right","")).upper(),
-                sq_q, sel["_type"], sq_ot.lower(), sq_pr))
+                si(sel.get("strike_price")), str(sel.get("right","")).upper(),
+                sq_q, sel["_t"], sq_ot.lower(), sq_pr))
             if r.ok:
                 st.success(f"✅ {act.upper()} order placed!")
-                SessionManager.log_order({"action":act.upper(),"instrument":sel.get("stock_code"),"strike":sel.get("strike_price"),"qty":sq_q,"status":"squared off"})
-                NotificationManager.position_closed(sel.get("stock_code",""), safe_int(sel.get("strike_price",0)))
+                log_activity("Square Off", f"{sel.get('stock_code')} {sel.get('strike_price')}")
                 time.sleep(1); st.rerun()
-            else: st.error(f"❌ {r.msg}")
+            else:
+                st.error(f"❌ {r.msg}")
 
     st.markdown("---")
     st.subheader("⚡ Square Off ALL")
-    st.markdown("""<div class="danger-box">⚠️ Closes ALL at market.</div>""", unsafe_allow_html=True)
-    if st.checkbox("Confirm",key="sq_all"):
+    st.markdown('<div class="db">⚠️ Closes ALL at market.</div>', unsafe_allow_html=True)
+    if st.checkbox("Confirm", key="sq_all"):
         if st.button("🔴 SQUARE OFF ALL", use_container_width=True):
             with st.spinner("Closing..."):
-                results = cl.square_off_all()
-                ok = sum(1 for r in results if r.get("success"))
+                res = c.square_off_all()
+                ok = sum(1 for r in res if r.get("success"))
                 if ok: st.success(f"✅ Closed {ok}")
-                if len(results)-ok: st.warning(f"⚠️ Failed {len(results)-ok}")
+                if len(res) - ok: st.warning(f"⚠️ Failed {len(res)-ok}")
                 time.sleep(1); st.rerun()
 
 
@@ -709,199 +611,200 @@ def page_square_off():
 # PAGE: ORDERS & TRADES
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_guard
-def page_orders_trades():
-    st.markdown('<div class="page-header">📋 Orders & Trades</div>', unsafe_allow_html=True)
-    cl = SessionManager.get_client()
-    if not cl: st.warning("Connect first"); return
+@guard
+def pg_orders():
+    st.markdown('<div class="ph">📋 Orders & Trades</div>', unsafe_allow_html=True)
+    c = cli()
+    if not c: st.warning("Connect first"); return
 
-    tab_o, tab_t, tab_h = st.tabs(["📋 Orders", "📊 Trades", "📝 Session Log"])
+    t1, t2, t3 = st.tabs(["📋 Orders", "📊 Trades", "📝 Activity"])
 
-    with tab_o:
-        st.subheader("Order Book")
-        c1,c2,c3,c4 = st.columns([1,1,1,1])
-        with c1: exch = st.selectbox("Exchange",["All","NFO","BFO"],key="o_e")
-        with c2: fd = st.date_input("From",datetime.now().date()-timedelta(days=7),key="o_f")
-        with c3: td = st.date_input("To",datetime.now().date(),key="o_t")
-        with c4:
-            st.markdown("<br>",unsafe_allow_html=True)
-            if st.button("🔄",key="o_r",use_container_width=True): st.rerun()
+    # ── Orders ────────────────────────────────────────────────────────
+    with t1:
+        cc = st.columns([1, 1, 1, 1])
+        with cc[0]: exch = st.selectbox("Exchange", ["All", "NFO", "BFO"], key="o_e")
+        with cc[1]: fd = st.date_input("From", datetime.now().date() - timedelta(7), key="o_f")
+        with cc[2]: td = st.date_input("To", datetime.now().date(), key="o_t")
+        with cc[3]:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄", key="o_r", use_container_width=True): st.rerun()
 
         with st.spinner("Loading orders..."):
-            resp = APIResp(cl.get_order_list("" if exch=="All" else exch, fd.strftime("%Y-%m-%d"), td.strftime("%Y-%m-%d")))
-
+            resp = R(c.orders("" if exch == "All" else exch,
+                              fd.strftime("%Y-%m-%d"), td.strftime("%Y-%m-%d")))
         if not resp.ok:
             st.error(resp.msg)
         else:
             olist = resp.items
-            if not olist: st.info("📭 No orders")
+            if not olist:
+                st.info("📭 No orders")
             else:
-                tot=len(olist)
-                exe=sum(1 for o in olist if str(o.get("order_status","")).lower()=="executed")
-                pen=sum(1 for o in olist if str(o.get("order_status","")).lower() in ("pending","open"))
-                rej=sum(1 for o in olist if str(o.get("order_status","")).lower()=="rejected")
-                mc=st.columns(4); mc[0].metric("Total",tot); mc[1].metric("Executed",exe); mc[2].metric("Pending",pen); mc[3].metric("Rejected",rej)
-                st.dataframe(pd.DataFrame(olist), use_container_width=True, height=400, hide_index=True)
+                # Summary
+                mc = st.columns(4)
+                mc[0].metric("Total", len(olist))
+                mc[1].metric("Executed", sum(1 for o in olist if str(o.get("order_status","")).lower() == "executed"))
+                mc[2].metric("Pending", sum(1 for o in olist if str(o.get("order_status","")).lower() in ("pending","open")))
+                mc[3].metric("Rejected", sum(1 for o in olist if str(o.get("order_status","")).lower() == "rejected"))
+                st.dataframe(pd.DataFrame(olist), use_container_width=True, height=350, hide_index=True)
 
-                pending=[o for o in olist if str(o.get("order_status","")).lower() in ("pending","open")]
+                # Manage pending
+                pending = [o for o in olist if str(o.get("order_status","")).lower() in ("pending","open")]
                 if pending:
-                    st.markdown("---"); st.subheader("Manage Pending")
-                    plbl=[f"#{o.get('order_id','?')} {o.get('stock_code','')} {o.get('action','')}" for o in pending]
-                    pi=st.selectbox("Order",range(len(plbl)),format_func=lambda x:plbl[x],key="op_s")
-                    ps=pending[pi]
-                    c1,c2=st.columns(2)
-                    with c1:
-                        if st.button("❌ Cancel",use_container_width=True,key="op_c"):
+                    st.markdown("---")
+                    st.subheader("Manage Pending")
+                    plbl = [f"#{o.get('order_id','?')} {o.get('stock_code','')} {o.get('action','')}" for o in pending]
+                    pi = st.selectbox("Order", range(len(plbl)), format_func=lambda x: plbl[x], key="op_s")
+                    ps = pending[pi]
+
+                    # Show details
+                    with st.expander("📄 Details", expanded=True):
+                        dc = st.columns(3)
+                        dc[0].write(f"**ID:** {ps.get('order_id')}"); dc[0].write(f"**Code:** {ps.get('stock_code')}")
+                        dc[1].write(f"**Action:** {ps.get('action')}"); dc[1].write(f"**Strike:** {ps.get('strike_price')}")
+                        dc[2].write(f"**Qty:** {ps.get('quantity')}"); dc[2].write(f"**Price:** ₹{ps.get('price')}")
+
+                    ac = st.columns(2)
+                    with ac[0]:
+                        if st.button("❌ Cancel", use_container_width=True, key="op_c"):
                             with st.spinner("..."):
-                                cr=APIResp(cl.cancel_order(ps.get("order_id"),ps.get("exchange_code")))
-                                if cr.ok: st.success("✅ Cancelled"); time.sleep(1); st.rerun()
+                                cr = R(c.cancel(ps.get("order_id"), ps.get("exchange_code")))
+                                if cr.ok: st.success("✅"); log_activity("Cancel", ps.get("order_id","")); time.sleep(1); st.rerun()
                                 else: st.error(cr.msg)
-                    with c2:
+                    with ac[1]:
                         with st.expander("✏️ Modify"):
-                            np=st.number_input("Price",min_value=0.0,value=safe_float(ps.get("price",0)),step=0.05,key="op_p")
-                            nq=st.number_input("Qty",min_value=1,value=max(1,safe_int(ps.get("quantity",1))),key="op_q")
-                            if st.button("💾 Save",key="op_sv"):
-                                mr=APIResp(cl.modify_order(ps.get("order_id"),ps.get("exchange_code"),nq,np))
+                            np = st.number_input("Price", 0.0, value=sf(ps.get("price", 0)), step=0.05, key="op_p")
+                            nq = st.number_input("Qty", 1, value=max(1, si(ps.get("quantity", 1))), key="op_q")
+                            if st.button("💾 Save", key="op_sv"):
+                                mr = R(c.modify(ps.get("order_id"), ps.get("exchange_code"), nq, np))
                                 if mr.ok: st.success("✅"); time.sleep(1); st.rerun()
                                 else: st.error(mr.msg)
 
-    with tab_t:
-        st.subheader("Trade Book")
-        c1,c2,c3,c4 = st.columns([1,1,1,1])
-        with c1: texch=st.selectbox("Exchange",["All","NFO","BFO"],key="t_e")
-        with c2: tfd=st.date_input("From",datetime.now().date()-timedelta(days=7),key="t_f")
-        with c3: ttd=st.date_input("To",datetime.now().date(),key="t_t")
-        with c4:
-            st.markdown("<br>",unsafe_allow_html=True)
-            if st.button("🔄",key="t_r",use_container_width=True): st.rerun()
+    # ── Trades ────────────────────────────────────────────────────────
+    with t2:
+        cc = st.columns([1, 1, 1, 1])
+        with cc[0]: te = st.selectbox("Exchange", ["All", "NFO", "BFO"], key="t_e")
+        with cc[1]: tf = st.date_input("From", datetime.now().date() - timedelta(7), key="t_f")
+        with cc[2]: tt = st.date_input("To", datetime.now().date(), key="t_t")
+        with cc[3]:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄", key="t_r", use_container_width=True): st.rerun()
 
         with st.spinner("Loading trades..."):
-            tresp=APIResp(cl.get_trade_list("" if texch=="All" else texch, tfd.strftime("%Y-%m-%d"), ttd.strftime("%Y-%m-%d")))
-
-        if not tresp.ok: st.error(tresp.msg)
+            tresp = R(c.trades("" if te == "All" else te,
+                               tf.strftime("%Y-%m-%d"), tt.strftime("%Y-%m-%d")))
+        if not tresp.ok:
+            st.error(tresp.msg)
         else:
-            tlist=tresp.items
-            if not tlist: st.info("📭 No trades")
+            tlist = tresp.items
+            if not tlist:
+                st.info("📭 No trades")
             else:
-                bc=sum(1 for t in tlist if str(t.get("action","")).lower()=="buy")
-                sc=sum(1 for t in tlist if str(t.get("action","")).lower()=="sell")
-                mc=st.columns(3); mc[0].metric("Total",len(tlist)); mc[1].metric("Buys",bc); mc[2].metric("Sells",sc)
-                st.dataframe(pd.DataFrame(tlist), use_container_width=True, height=400, hide_index=True)
+                mc = st.columns(3)
+                mc[0].metric("Total", len(tlist))
+                mc[1].metric("Buys", sum(1 for t in tlist if str(t.get("action","")).lower() == "buy"))
+                mc[2].metric("Sells", sum(1 for t in tlist if str(t.get("action","")).lower() == "sell"))
+                st.dataframe(pd.DataFrame(tlist), use_container_width=True, height=350, hide_index=True)
 
-    with tab_h:
-        st.subheader("📝 Session Activity Log")
-        hist = SessionManager.get_order_history()
-        if hist:
-            st.dataframe(pd.DataFrame(hist), hide_index=True, use_container_width=True)
+    # ── Activity ──────────────────────────────────────────────────────
+    with t3:
+        al = st.session_state.get("activity_log", [])
+        if al:
+            st.dataframe(pd.DataFrame(al), hide_index=True, use_container_width=True)
         else:
             st.info("No activity this session")
-
-        conn_log = SessionManager.get_connection_log()
-        if conn_log:
-            st.markdown("---")
-            st.subheader("🔌 Connection Log")
-            st.dataframe(pd.DataFrame(conn_log), hide_index=True, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: POSITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-@api_guard
-def page_positions():
-    st.markdown('<div class="page-header">📍 Positions</div>', unsafe_allow_html=True)
-    cl = SessionManager.get_client()
-    if not cl: st.warning("Connect first"); return
+@guard
+def pg_pos():
+    st.markdown('<div class="ph">📍 Positions</div>', unsafe_allow_html=True)
+    c = cli()
+    if not c: st.warning("Connect first"); return
 
-    debug = st.session_state.get("debug_mode",False)
-    if st.button("🔄 Refresh",key="pos_r",use_container_width=True): st.rerun()
+    if st.button("🔄 Refresh", key="p_r", use_container_width=True): st.rerun()
 
     with st.spinner("Loading..."):
-        resp = APIResp(cl.get_portfolio_positions())
+        resp = R(c.positions())
     if not resp.ok: st.error(resp.msg); return
 
     enhanced = []
-    total_pnl = 0.0
+    total = 0.0
     for p in resp.items:
-        qty = safe_int(p.get("quantity",0))
-        if qty==0: continue
-        pt = PositionUtils.detect_type(p)
-        aq = abs(qty)
-        avg = safe_float(p.get("average_price",0))
-        ltp = safe_float(p.get("ltp",avg))
-        pnl = PositionUtils.calc_pnl(pt,avg,ltp,aq)
-        total_pnl += pnl
-        enhanced.append({
-            "sc":p.get("stock_code",""), "disp":Config.get_instrument_display(p.get("stock_code","")),
-            "exch":p.get("exchange_code",""), "expiry":p.get("expiry_date",""),
-            "strike":p.get("strike_price",""), "right":p.get("right",""),
-            "qty":aq, "type":pt, "avg":avg, "ltp":ltp, "pnl":pnl, "_raw":p,
-        })
+        q = si(p.get("quantity"))
+        if q == 0: continue
+        pt = detect_type(p)
+        aq = abs(q)
+        avg, ltp = sf(p.get("average_price")), sf(p.get("ltp", p.get("average_price")))
+        pnl = calc_pnl(pt, avg, ltp, aq)
+        total += pnl
+        enhanced.append({"sc": p.get("stock_code",""), "disp": C.display_name(p.get("stock_code","")),
+                         "ex": p.get("exchange_code",""), "exp": p.get("expiry_date",""),
+                         "strike": p.get("strike_price",""), "right": p.get("right",""),
+                         "qty": aq, "type": pt, "avg": avg, "ltp": ltp, "pnl": pnl, "_raw": p})
 
     if not enhanced: st.info("📭 No active positions"); return
 
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Total",len(enhanced))
-    c2.metric("Long",sum(1 for e in enhanced if e["type"]=="long"))
-    c3.metric("Short",sum(1 for e in enhanced if e["type"]=="short"))
-    c4.metric("P&L",f"₹{total_pnl:+,.2f}",delta_color="normal" if total_pnl>=0 else "inverse")
+    mc = st.columns(4)
+    mc[0].metric("Total", len(enhanced))
+    mc[1].metric("Long", sum(1 for e in enhanced if e["type"] == "long"))
+    mc[2].metric("Short", sum(1 for e in enhanced if e["type"] == "short"))
+    mc[3].metric("P&L", f"₹{total:+,.2f}", delta_color="normal" if total >= 0 else "inverse")
 
     st.dataframe(pd.DataFrame([{
-        "Instrument":e["disp"],"Strike":e["strike"],"Option":e["right"],
-        "Qty":e["qty"],"Position":e["type"].upper(),
-        "Avg":f"₹{e['avg']:.2f}","LTP":f"₹{e['ltp']:.2f}",
-        "P&L":f"₹{e['pnl']:+,.2f}","Close":PositionUtils.close_action(e["type"]).upper(),
+        "Instrument": e["disp"], "Strike": e["strike"], "Option": e["right"],
+        "Qty": e["qty"], "Position": e["type"].upper(),
+        "Avg": f"₹{e['avg']:.2f}", "LTP": f"₹{e['ltp']:.2f}",
+        "P&L": f"₹{e['pnl']:+,.2f}", "Close": close_action(e["type"]).upper(),
     } for e in enhanced]), use_container_width=True, hide_index=True)
 
-    if debug:
+    if st.session_state.get("debug"):
         with st.expander("🔧 Raw"):
             for e in enhanced: st.json(e["_raw"])
 
     st.markdown("---")
     for e in enhanced:
-        em = "📈" if e["pnl"]>=0 else "📉"
-        with st.expander(f"{em} {e['disp']} {e['strike']} {e['right']} | {'🟢 LONG' if e['type']=='long' else '🔴 SHORT'} | P&L: ₹{e['pnl']:+,.2f}"):
-            c1,c2,c3=st.columns(3)
-            c1.write(f"**Code:** {e['sc']}"); c1.write(f"**Exchange:** {e['exch']}"); c1.write(f"**Expiry:** {e['expiry']}")
+        em = "📈" if e["pnl"] >= 0 else "📉"
+        badge = "🟢 LONG" if e["type"] == "long" else "🔴 SHORT"
+        with st.expander(f"{em} {e['disp']} {e['strike']} {e['right']} | {badge} | ₹{e['pnl']:+,.2f}"):
+            c1, c2, c3 = st.columns(3)
+            c1.write(f"**Code:** {e['sc']}"); c1.write(f"**Exchange:** {e['ex']}"); c1.write(f"**Expiry:** {e['exp']}")
             c2.write(f"**Position:** {e['type'].upper()}"); c2.write(f"**Qty:** {e['qty']}"); c2.write(f"**Avg:** ₹{e['avg']:.2f}")
+            color = "profit" if e["pnl"] >= 0 else "loss"
             c3.write(f"**LTP:** ₹{e['ltp']:.2f}")
-            color = "profit" if e["pnl"]>=0 else "loss"
-            c3.markdown(f"<span class='{color}'>₹{e['pnl']:+,.2f}</span>",unsafe_allow_html=True)
-            c3.write(f"**Close:** {PositionUtils.close_action(e['type']).upper()}")
-            if st.button("🔄 Square Off",key=f"sq_{e['sc']}_{e['strike']}_{e['right']}",use_container_width=True):
-                SessionManager.set_page("Square Off"); st.rerun()
+            c3.markdown(f"<span class='{color}'>₹{e['pnl']:+,.2f}</span>", unsafe_allow_html=True)
+            c3.write(f"**Close:** {close_action(e['type']).upper()}")
+            if st.button("🔄 Square Off", key=f"sq_{e['sc']}_{e['strike']}_{e['right']}", use_container_width=True):
+                go("Square Off"); st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROUTER & MAIN
+# ROUTER
 # ══════════════════════════════════════════════════════════════════════════════
 
-PAGES = {
-    "Dashboard": page_dashboard,
-    "Option Chain": page_option_chain,
-    "Sell Options": page_sell_options,
-    "Square Off": page_square_off,
-    "Orders & Trades": page_orders_trades,
-    "Positions": page_positions,
+ROUTER = {
+    "Dashboard": pg_dash,
+    "Option Chain": pg_oc,
+    "Sell Options": pg_sell,
+    "Square Off": pg_sqoff,
+    "Orders & Trades": pg_orders,
+    "Positions": pg_pos,
 }
 
 
 def main():
-    SessionManager.init()
-    render_sidebar()
-
-    st.markdown('<h1 class="main-header">📈 Breeze Options Trader</h1>', unsafe_allow_html=True)
+    C.init_state()
+    sidebar()
+    st.markdown('<h1 class="hdr">📈 Breeze Options Trader</h1>', unsafe_allow_html=True)
     st.markdown("---")
-
-    page = SessionManager.get_page()
-    fn = PAGES.get(page, page_dashboard)
-
-    if page in AUTH_REQUIRED and not SessionManager.is_authenticated():
-        st.warning("🔒 Please login")
+    p = page()
+    if p in AUTH_PAGES and not auth():
+        st.warning("🔒 Login required")
         st.info("👈 Enter credentials in sidebar")
         return
-
-    fn()
+    ROUTER.get(p, pg_dash)()
 
 
 if __name__ == "__main__":
