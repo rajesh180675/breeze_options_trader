@@ -1,96 +1,58 @@
 """
-Configuration for Breeze Options Trader.
+Configuration — instruments, expiry logic, session state defaults.
 """
-
 import streamlit as st
 from datetime import datetime, timedelta
 import pytz
 
+IST = pytz.timezone("Asia/Kolkata")
 
-class Config:
-    """Application configuration — single source of truth."""
+# ── Instruments ───────────────────────────────────────────────────────────────
+# stock_code = what Breeze API expects (BSESEN not SENSEX)
+# expiry_day = weekly expiry weekday
 
-    IST = pytz.timezone("Asia/Kolkata")
+INSTRUMENTS = {
+    "NIFTY":      {"stock_code": "NIFTY",      "exchange": "NFO", "lot": 65,  "gap": 50,  "expiry_day": "Tuesday",   "desc": "NIFTY 50"},
+    "BANKNIFTY":  {"stock_code": "BANKNIFTY",  "exchange": "NFO", "lot": 15,  "gap": 100, "expiry_day": "Wednesday", "desc": "Bank NIFTY"},
+    "FINNIFTY":   {"stock_code": "FINNIFTY",   "exchange": "NFO", "lot": 25,  "gap": 50,  "expiry_day": "Tuesday",   "desc": "NIFTY Financial"},
+    "MIDCPNIFTY": {"stock_code": "MIDCPNIFTY", "exchange": "NFO", "lot": 50,  "gap": 25,  "expiry_day": "Monday",    "desc": "NIFTY Midcap"},
+    "SENSEX":     {"stock_code": "BSESEN",     "exchange": "BFO", "lot": 20,  "gap": 100, "expiry_day": "Thursday",  "desc": "BSE SENSEX"},
+    "BANKEX":     {"stock_code": "BANKEX",     "exchange": "BFO", "lot": 15,  "gap": 100, "expiry_day": "Monday",    "desc": "BSE BANKEX"},
+}
 
-    INSTRUMENTS = {
-        "NIFTY": {
-            "stock_code": "NIFTY",
-            "exchange": "NFO",
-            "lot_size": 65,
-            "strike_gap": 50,
-            "expiry_day": "Tuesday",
-            "description": "NIFTY 50 Index",
-        },
-        "BANKNIFTY": {
-            "stock_code": "BANKNIFTY",
-            "exchange": "NFO",
-            "lot_size": 15,
-            "strike_gap": 100,
-            "expiry_day": "Wednesday",
-            "description": "Bank NIFTY Index",
-        },
-        "FINNIFTY": {
-            "stock_code": "FINNIFTY",
-            "exchange": "NFO",
-            "lot_size": 25,
-            "strike_gap": 50,
-            "expiry_day": "Tuesday",
-            "description": "NIFTY Financial Services",
-        },
-        "MIDCPNIFTY": {
-            "stock_code": "MIDCPNIFTY",
-            "exchange": "NFO",
-            "lot_size": 50,
-            "strike_gap": 25,
-            "expiry_day": "Monday",
-            "description": "NIFTY Midcap Select",
-        },
-        "SENSEX": {
-            "stock_code": "BSESEN",
-            "exchange": "BFO",
-            "lot_size": 20,
-            "strike_gap": 100,
-            "expiry_day": "Thursday",
-            "description": "BSE SENSEX Index",
-        },
-        "BANKEX": {
-            "stock_code": "BANKEX",
-            "exchange": "BFO",
-            "lot_size": 15,
-            "strike_gap": 100,
-            "expiry_day": "Monday",
-            "description": "BSE BANKEX Index",
-        },
-    }
-
-    @staticmethod
-    def get_next_expiries(instrument: str, count: int = 5) -> list:
-        inst = Config.INSTRUMENTS.get(instrument)
-        if not inst:
-            return []
-        day_map = {
-            "Monday": 0, "Tuesday": 1, "Wednesday": 2,
-            "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
-        }
-        target = day_map.get(inst["expiry_day"], 3)
-        now = datetime.now(Config.IST)
-        days_ahead = (target - now.weekday()) % 7
-        next_exp = now if days_ahead == 0 else now + timedelta(days=days_ahead)
-        return [(next_exp + timedelta(weeks=i)).strftime("%Y-%m-%d")
-                for i in range(count)]
-
-    @staticmethod
-    def get_instrument_display(stock_code: str) -> str:
-        for name, cfg in Config.INSTRUMENTS.items():
-            if cfg["stock_code"] == stock_code:
-                return name
-        return stock_code
+DAY_MAP = {"Monday": 0, "Tuesday": 1, "Wednesday": 2,
+           "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6}
 
 
-class SessionState:
-    """Backward-compat wrapper — delegates to SessionManager."""
+def get_expiries(instrument: str, n: int = 5) -> list:
+    """Next n weekly expiry dates as YYYY-MM-DD strings."""
+    cfg = INSTRUMENTS.get(instrument)
+    if not cfg:
+        return []
+    target = DAY_MAP[cfg["expiry_day"]]
+    now = datetime.now(IST)
+    ahead = (target - now.weekday()) % 7
+    nxt = now if ahead == 0 else now + timedelta(days=ahead)
+    return [(nxt + timedelta(weeks=i)).strftime("%Y-%m-%d") for i in range(n)]
 
-    @staticmethod
-    def init_session_state():
-        from session_manager import SessionManager
-        SessionManager.init()
+
+def display_name(stock_code: str) -> str:
+    """Map API code back to display name (BSESEN → SENSEX)."""
+    for name, cfg in INSTRUMENTS.items():
+        if cfg["stock_code"] == stock_code:
+            return name
+    return stock_code
+
+
+def init_state():
+    """Initialise session state with safe defaults."""
+    for k, v in {
+        "authenticated": False, "breeze": None,
+        "api_key": "", "api_secret": "", "session_token": "",
+        "login_time": None, "user_name": "",
+        "page": "Dashboard", "selected_instrument": "NIFTY",
+        "debug": False, "oc_cache": {}, "oc_ts": {},
+        "activity_log": [],
+    }.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
